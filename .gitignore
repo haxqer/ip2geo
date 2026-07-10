@@ -1,0 +1,11 @@
+# compiled databases and MaxMind source data
+*.geoc
+*.mmdb
+
+# build artifacts
+/ip2geo
+/bench/bench
+
+# editor / OS cruft
+.DS_Store
+*.out
