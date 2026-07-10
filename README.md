@@ -31,6 +31,26 @@ Reproduce it yourself with [`bench/`](bench) — see below.
 go get github.com/haxqer/ip2geo
 ```
 
+## Try it now — sample data, no signup
+
+No MaxMind account yet? Grab a ready-made database built from the free,
+redistributable [DB-IP IP-to-City Lite](https://db-ip.com/db/download/ip-to-city-lite)
+dataset and start looking up addresses immediately:
+
+```sh
+# pick one: country (1.7 MB), region (11 MB), or city (32 MB)
+curl -LO https://github.com/haxqer/ip2geo/releases/download/data-2026-07/dbip-city-lite.geoc.gz
+gunzip dbip-city-lite.geoc.gz
+
+go run github.com/haxqer/ip2geo/cmd/ip2geo@latest lookup -db dbip-city-lite.geoc 8.8.8.8
+# 8.8.8.8: US / California / Mountain View  (37.4220, -122.0850)
+```
+
+These `.geoc` files load with **zero third-party dependencies** via
+`ip2geo.Open`. Browse every build on the
+[data releases](https://github.com/haxqer/ip2geo/releases) page.
+IP geolocation by [DB-IP](https://db-ip.com), licensed under CC BY 4.0.
+
 ## Quick start (drop-in library)
 
 Point it at the same `.mmdb` you already use with `geoip2-golang`
@@ -145,4 +165,7 @@ dependency never touches the `ip2geo` library.
 ## License
 
 MIT — see [LICENSE](LICENSE). This project is not affiliated with MaxMind, Inc.
-GeoIP2 / GeoLite2 are trademarks of MaxMind, Inc.
+GeoIP2 / GeoLite2 are trademarks of MaxMind, Inc. The sample databases on the
+[releases](https://github.com/haxqer/ip2geo/releases) page are derived from the
+DB-IP IP-to-City Lite dataset, © DB-IP, licensed under
+[CC BY 4.0](https://creativecommons.org/licenses/by/4.0/).
