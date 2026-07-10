@@ -91,29 +91,44 @@ func main() {
 
 That's the whole library. Works the same for IPv6.
 
-## Optional: pre-build for instant startup and zero dependencies
+## Convert an `.mmdb` → `.geoc`
 
-`mmdb.Open` scans the source database, which takes a few seconds. For servers
-that restart often, build a compact `.geoc` **once** and load it in a fraction
-of a second — this path imports **only the standard library** (no `maxminddb`):
+`mmdb.Open` rebuilds the index in memory on every start (a few seconds). Convert
+your MaxMind **or DB-IP** `.mmdb` to a compact `.geoc` **once**, and `ip2geo.Open`
+then loads it in a fraction of a second using **only the standard library** (no
+`maxminddb`) — ideal for servers that restart often, containers, and CLIs.
 
-```go
-db, _ := ip2geo.Open("city.geoc") // sub-second, zero third-party deps
-rec, ok := db.Lookup(ip)
-```
-
-Create the `.geoc` from Go:
-
-```go
-_, err := mmdb.Build("GeoIP2-City.mmdb", "city.geoc", mmdb.Options{Profile: ip2geo.ProfileCity})
-```
-
-or with the optional CLI:
+**Command line** — install once, convert any City `.mmdb`:
 
 ```sh
 go install github.com/haxqer/ip2geo/cmd/ip2geo@latest
-ip2geo build -src GeoIP2-City.mmdb -out city.geoc -profile city
+
+ip2geo build -src GeoIP2-City.mmdb -out city.geoc                        # full city detail
+ip2geo build -src GeoIP2-City.mmdb -out country.geoc -profile country    # smaller, country only
+ip2geo build -src GeoIP2-City.mmdb -out city.geoc -latscale 2            # round coords (~1 km), smaller
+
 ip2geo lookup -db city.geoc 81.2.69.142 2001:4860:4860::8888
+```
+
+| flag | meaning | default |
+|---|---|---|
+| `-src` | input MaxMind/DB-IP City `.mmdb` | (required) |
+| `-out` | output `.geoc` path | `city.geoc` |
+| `-profile` | `city` \| `region` \| `country` | `city` |
+| `-lang` | language code for names | `en` |
+| `-latscale` | lat/lon decimals kept (city profile) | `4` |
+
+**From Go** — the same conversion, programmatically:
+
+```go
+mmdb.Build("GeoIP2-City.mmdb", "city.geoc", mmdb.Options{Profile: ip2geo.ProfileCity})
+```
+
+**Load the result** anywhere, with zero third-party dependencies:
+
+```go
+db, _ := ip2geo.Open("city.geoc") // sub-second startup
+rec, ok := db.Lookup(ip)
 ```
 
 ## Profiles: trade detail for size
