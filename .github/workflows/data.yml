@@ -81,9 +81,12 @@ jobs:
           go-version: stable
           cache: false # this job publishes; do not restore caches written by other runs
 
-      # Download dbip-city-lite-YYYY-MM.mmdb.gz (fails clearly on a 404),
-      # build the country/region/city .geoc files, gzip -9 them, write
-      # ATTRIBUTION.txt and checksums.txt.
+      # Download the month's DB-IP City, Country and ASN Lite .mmdb.gz
+      # (fails clearly on a 404), build the country/region/city .geoc files
+      # from City, gzip -9 them, write ATTRIBUTION.txt and checksums.txt.
+      # The three downloads are attached unchanged as dbip-*-lite.mmdb.gz:
+      # DB-IP serves only the current month, so the release keeps the month's
+      # sources for later checks (scripts/size-table.sh fetch, ci.yml).
       - name: Build
         if: steps.existing.outputs.exists == 'false'
         env:

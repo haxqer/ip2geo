@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Build and publish the monthly DB-IP Lite sample databases (data-YYYY-MM).
 #
-#   scripts/data-release.sh build   YYYY-MM OUTDIR   download DB-IP City Lite and build the assets
+#   scripts/data-release.sh build   YYYY-MM OUTDIR   download DB-IP City, Country and ASN Lite and build the assets
 #   scripts/data-release.sh verify  YYYY-MM OUTDIR   run the builder-vs-source integration test
 #   scripts/data-release.sh exists  YYYY-MM          exit 0 if release data-YYYY-MM exists, 1 if not
 #   scripts/data-release.sh publish YYYY-MM OUTDIR   create GitHub Release data-YYYY-MM from OUTDIR
@@ -11,21 +11,32 @@
 # need GH_TOKEN (data.yml passes the workflow's GITHUB_TOKEN); GH_REPO selects
 # the repository, otherwise gh uses the current checkout's remote.
 #
-# build leaves exactly five release assets in OUTDIR:
+# build leaves exactly eight release assets in OUTDIR:
 #   dbip-country-lite.geoc.gz  dbip-region-lite.geoc.gz  dbip-city-lite.geoc.gz
+#   dbip-city-lite.mmdb.gz     dbip-country-lite.mmdb.gz dbip-asn-lite.mmdb.gz
 #   ATTRIBUTION.txt            checksums.txt (sha256sum -c format)
-# plus release-notes.md (the release body, not an asset). The downloaded
-# source, the decompressed .mmdb and the CLI binary stay in OUTDIR/.work
-# (override with DATA_WORKDIR); a rerun reuses a valid download.
+# plus release-notes.md (the release body, not an asset). The .mmdb.gz files
+# are the month's DB-IP downloads, byte for byte, renamed without the month:
+# DB-IP serves only the current month, so the release is what keeps a month's
+# sources available, for example to scripts/size-table.sh fetch. The
+# downloads, the decompressed City .mmdb and the CLI binary stay in
+# OUTDIR/.work (override with DATA_WORKDIR); a rerun reuses valid downloads.
 #
 # Exit status: 0 on success, 1 only from exists when the release is absent,
 # 2 on any error (bad arguments, failed download or build, API failure).
 #
-# The data is DB-IP IP-to-City Lite, (c) DB-IP.com, CC BY 4.0. Every published
-# set must ship ATTRIBUTION.txt.
+# The data is DB-IP IP-to-City Lite, IP-to-Country Lite and IP-to-ASN Lite,
+# (c) DB-IP.com, CC BY 4.0, which allows redistribution with attribution.
+# Every published set must ship ATTRIBUTION.txt.
 set -euo pipefail
 
-readonly ASSETS=(dbip-country-lite.geoc.gz dbip-region-lite.geoc.gz dbip-city-lite.geoc.gz ATTRIBUTION.txt checksums.txt)
+# SOURCES are the DB-IP Lite editions downloaded and attached; city is the
+# one the .geoc files are built from.
+readonly SOURCES=(city country asn)
+# SUMMED are the assets listed in checksums.txt, ASSETS every asset.
+readonly SUMMED=(dbip-country-lite.geoc.gz dbip-region-lite.geoc.gz dbip-city-lite.geoc.gz
+	dbip-city-lite.mmdb.gz dbip-country-lite.mmdb.gz dbip-asn-lite.mmdb.gz ATTRIBUTION.txt)
+readonly ASSETS=("${SUMMED[@]}" checksums.txt)
 readonly PROFILES=(country region city)
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -65,16 +76,14 @@ abs_dir() {
 	(cd "$1" && pwd)
 }
 
-cmd_build() {
-	local month=$1 out work
-	out="$(abs_dir "$2")"
-	work="$(abs_dir "$(work_dir "$out")")"
+# download MONTH EDITION WORK: download dbip-EDITION-lite-MONTH.mmdb.gz into
+# WORK, or reuse a complete earlier download.
+download() {
+	local month=$1 edition=$2 work=$3
+	local name="dbip-${edition}-lite-${month}.mmdb.gz"
+	local url="https://download.db-ip.com/free/${name}"
+	local gz="$work/${name}"
 
-	local name="dbip-city-lite-${month}.mmdb"
-	local url="https://download.db-ip.com/free/${name}.gz"
-	local gz="$work/${name}.gz" mmdb="$work/${name}"
-
-	# 1. Download (or reuse a complete earlier download).
 	if [[ -s $gz ]] && gzip -t "$gz" 2>/dev/null; then
 		log "reusing $gz"
 	else
@@ -83,7 +92,7 @@ cmd_build() {
 			die "cannot reach $url"
 		case $status in
 		200) ;;
-		404) die "DB-IP has not published ${name}.gz (HTTP 404 from $url). DB-IP publishes early in the month; retry later or pass an earlier month." ;;
+		404) die "DB-IP has not published ${name} (HTTP 404 from $url). DB-IP publishes early in the month; retry later or pass an earlier month." ;;
 		*) die "unexpected HTTP $status from $url" ;;
 		esac
 		log "downloading $url"
@@ -92,8 +101,25 @@ cmd_build() {
 		mv "$gz.part" "$gz"
 	fi
 	log "source: $gz ($(mib "$(filesize "$gz")"))"
+}
 
-	# 2. Decompress.
+cmd_build() {
+	local month=$1 out work
+	out="$(abs_dir "$2")"
+	work="$(abs_dir "$(work_dir "$out")")"
+
+	local name="dbip-city-lite-${month}.mmdb"
+	local gz="$work/${name}.gz" mmdb="$work/${name}"
+
+	# 1. Download every edition (or reuse complete earlier downloads) and
+	#    attach each unchanged, under the release's month-less name.
+	local edition
+	for edition in "${SOURCES[@]}"; do
+		download "$month" "$edition" "$work"
+		cp "$work/dbip-${edition}-lite-${month}.mmdb.gz" "$out/dbip-${edition}-lite.mmdb.gz"
+	done
+
+	# 2. Decompress the City source.
 	gunzip -c "$gz" >"$mmdb.part"
 	mv "$mmdb.part" "$mmdb"
 	log "source: $mmdb ($(mib "$(filesize "$mmdb")"))"
@@ -130,7 +156,7 @@ cmd_build() {
 	local commit
 	commit="$(git -C "$repo_root" rev-parse HEAD 2>/dev/null || echo unknown)"
 	write_attribution "$month" "$commit" >"$out/ATTRIBUTION.txt"
-	(cd "$out" && sha256 "${ASSETS[@]:0:4}" >checksums.txt)
+	(cd "$out" && sha256 "${SUMMED[@]}" >checksums.txt)
 	write_notes "$month" "$commit" "$out" "$stats" >"$out/release-notes.md"
 
 	log "assets in $out:"
@@ -156,6 +182,20 @@ modification to the underlying geolocation data. The CC BY 4.0 license and
 this attribution apply to these derived files.
 
 Converted with github.com/haxqer/ip2geo at commit ${commit}.
+
+This release also redistributes the ${month} source files themselves,
+unmodified: the files are DB-IP's downloads byte for byte, renamed only to
+drop the month from the file name.
+
+  dbip-city-lite.mmdb.gz     dbip-city-lite-${month}.mmdb.gz
+                             https://db-ip.com/db/download/ip-to-city-lite
+  dbip-country-lite.mmdb.gz  dbip-country-lite-${month}.mmdb.gz
+                             https://db-ip.com/db/download/ip-to-country-lite
+  dbip-asn-lite.mmdb.gz      dbip-asn-lite-${month}.mmdb.gz
+                             https://db-ip.com/db/download/ip-to-asn-lite
+
+Copyright (c) DB-IP.com, licensed under the same CC BY 4.0 license, with
+the same attribution: IP Geolocation by DB-IP — https://db-ip.com
 TXT
 }
 
@@ -174,6 +214,9 @@ Ready-to-use sample databases so you can try **ip2geo** without registering for 
 | \`dbip-country-lite.geoc.gz\` | $(mib "$(filesize "$out/dbip-country-lite.geoc.gz")") | Country ISO code + name |
 | \`dbip-region-lite.geoc.gz\` | $(mib "$(filesize "$out/dbip-region-lite.geoc.gz")") | + region / subdivision |
 | \`dbip-city-lite.geoc.gz\` | $(mib "$(filesize "$out/dbip-city-lite.geoc.gz")") | + city, latitude / longitude |
+| \`dbip-city-lite.mmdb.gz\` | $(mib "$(filesize "$out/dbip-city-lite.mmdb.gz")") | source: DB-IP IP-to-City Lite ${month}, unmodified |
+| \`dbip-country-lite.mmdb.gz\` | $(mib "$(filesize "$out/dbip-country-lite.mmdb.gz")") | source: DB-IP IP-to-Country Lite ${month}, unmodified |
+| \`dbip-asn-lite.mmdb.gz\` | $(mib "$(filesize "$out/dbip-asn-lite.mmdb.gz")") | source: DB-IP IP-to-ASN Lite ${month}, unmodified |
 | \`ATTRIBUTION.txt\` | | CC BY 4.0 attribution |
 | \`checksums.txt\` | | SHA-256 of the files above (\`sha256sum -c checksums.txt\`) |
 
@@ -200,6 +243,8 @@ IP Geolocation by **DB-IP** — https://db-ip.com
 Licensed under **Creative Commons Attribution 4.0 (CC BY 4.0)**. See \`ATTRIBUTION.txt\`.
 
 These files are provided for testing and evaluation. For production use, download a current DB-IP database or use your own MaxMind GeoIP2/GeoLite2 file with \`mmdb.Open\`.
+
+The \`.mmdb.gz\` files are the ${month} DB-IP Lite sources, attached unmodified (only renamed without the month) because DB-IP serves only the current month; they keep this month's builds reproducible, and the README's size table is checked against them.
 
 <details><summary>Build details</summary>
 
