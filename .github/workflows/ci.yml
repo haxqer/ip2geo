@@ -70,6 +70,31 @@ jobs:
           GOARCH: "386"
         run: go test ./
 
+  # The hermetic reader tests on the other two release platforms: Open
+  # memory-maps through mmap_windows.go there and through the Unix path with
+  # Darwin's mmap on macOS. The root package only; the CLI and mmdb tests do
+  # not depend on the platform.
+  test-os:
+    name: test (${{ matrix.os }}, Go stable)
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: stable
+          cache: true
+
+      - name: go test (root package)
+        run: go test ./
+
   lint:
     runs-on: ubuntu-latest
     timeout-minutes: 10

@@ -1,0 +1,204 @@
+name: Bench
+
+# Compares Reader.Lookup speed with the previous v* release on DB-IP
+# IP-to-City Lite (CC BY 4.0, used only as test input; nothing built here is
+# published). Both trees run the same BenchmarkLookup in ./mmdb, which builds
+# its readers in memory from the source with that tree's builder, so the
+# comparison covers the file format as well as the search code.
+#
+# The job fails only when a Lookup/ row of benchstat's sec/op table is more
+# than 10% slower than the previous release with p < 0.05. Shared runners
+# are noisy; the summary of every run shows the whole table.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  GOTOOLCHAIN: local
+  # golang.org/x/perf has no release tags: pin its newest pseudo-version.
+  BENCHSTAT: golang.org/x/perf/cmd/benchstat@v0.0.0-20261009192801-be2c69fb417e
+  # A Lookup/ row slower than the base by more than this percentage, with
+  # p below ALPHA, fails the job.
+  MAX_SLOWDOWN: "10"
+  ALPHA: "0.05"
+
+jobs:
+  lookup:
+    name: lookup vs previous release (DB-IP Lite)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash # -eo pipefail, so a failing go test is not hidden by tee
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0 # full history and tags, for git describe
+
+      # The newest v* tag reachable from HEAD; on a tagged commit, the one
+      # before it, so a release is not compared with itself.
+      - name: Find the previous release
+        id: base
+        run: |
+          tag="$(git describe --tags --match 'v*' --abbrev=0 2>/dev/null || true)"
+          if [ -n "$tag" ] && [ "$(git rev-parse "${tag}^{commit}")" = "$(git rev-parse HEAD)" ]; then
+            tag="$(git describe --tags --match 'v*' --abbrev=0 "${tag}^" 2>/dev/null || true)"
+          fi
+          if [ -z "$tag" ]; then
+            echo "::notice::no earlier v* tag; skipping the benchmark comparison"
+            echo "No earlier \`v*\` tag: the benchmark comparison was skipped." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "Comparing with ${tag}"
+          fi
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        if: steps.base.outputs.tag != ''
+        with:
+          go-version: stable
+          cache: true
+
+      # The DB-IP steps are the integration job's in ci.yml, with the same
+      # cache key, so the two workflows share one download per month.
+      #
+      # DB-IP publishes the new month early in the month; until then the
+      # current month's file is a 404, so fall back to the previous month.
+      - name: Pick DB-IP Lite month
+        if: steps.base.outputs.tag != ''
+        id: dbip
+        run: |
+          month="$(date -u +%Y-%m)"
+          url="https://download.db-ip.com/free/dbip-city-lite-${month}.mmdb.gz"
+          if ! curl -fsSIL --retry 2 -o /dev/null "$url"; then
+            prev="$(date -u -d "$(date -u +%Y-%m-01) -1 month" +%Y-%m)"
+            echo "::notice::${url} is not available yet; using ${prev}"
+            month="$prev"
+          fi
+          {
+            echo "month=${month}"
+            echo "dir=${RUNNER_TEMP}/dbip"
+            echo "gz=${RUNNER_TEMP}/dbip/dbip-city-lite-${month}.mmdb.gz"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Restore DB-IP Lite from cache
+        if: steps.base.outputs.tag != ''
+        id: cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ steps.dbip.outputs.dir }}
+          key: dbip-city-lite-${{ steps.dbip.outputs.month }}
+
+      - name: Download DB-IP Lite
+        if: steps.base.outputs.tag != '' && steps.cache.outputs.cache-hit != 'true'
+        env:
+          MONTH: ${{ steps.dbip.outputs.month }}
+          DIR: ${{ steps.dbip.outputs.dir }}
+          GZ: ${{ steps.dbip.outputs.gz }}
+        run: |
+          mkdir -p "$DIR"
+          curl -fsSL --retry 3 --retry-delay 5 -o "$GZ" \
+            "https://download.db-ip.com/free/dbip-city-lite-${MONTH}.mmdb.gz"
+          gzip -t "$GZ"
+          ls -l "$GZ"
+
+      - name: Save DB-IP Lite to cache
+        if: steps.base.outputs.tag != '' && steps.cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ steps.dbip.outputs.dir }}
+          key: ${{ steps.cache.outputs.cache-primary-key }}
+
+      - name: Decompress
+        if: steps.base.outputs.tag != ''
+        env:
+          GZ: ${{ steps.dbip.outputs.gz }}
+        run: gunzip -c "$GZ" > "${RUNNER_TEMP}/dbip-city-lite.mmdb"
+
+      - name: Check out the previous release
+        if: steps.base.outputs.tag != ''
+        env:
+          TAG: ${{ steps.base.outputs.tag }}
+        run: git worktree add --detach "${RUNNER_TEMP}/base" "$TAG"
+
+      - name: Install benchstat
+        if: steps.base.outputs.tag != ''
+        run: GOBIN="${RUNNER_TEMP}/bin" go install "$BENCHSTAT"
+
+      # The previous release first, then this commit, on the same runner.
+      # -count=6 gives benchstat six samples per benchmark for its
+      # significance test. No -race.
+      - name: Benchmark the previous release
+        if: steps.base.outputs.tag != ''
+        env:
+          IP2GEO_TEST_MMDB: ${{ runner.temp }}/dbip-city-lite.mmdb
+        run: |
+          test -s "$IP2GEO_TEST_MMDB"
+          cd "${RUNNER_TEMP}/base"
+          go test -run '^$' -bench BenchmarkLookup -benchtime=1s -count=6 -timeout 30m ./mmdb/ |
+            tee "${RUNNER_TEMP}/base.txt"
+
+      - name: Benchmark this commit
+        if: steps.base.outputs.tag != ''
+        env:
+          IP2GEO_TEST_MMDB: ${{ runner.temp }}/dbip-city-lite.mmdb
+        run: |
+          go test -run '^$' -bench BenchmarkLookup -benchtime=1s -count=6 -timeout 30m ./mmdb/ |
+            tee "${RUNNER_TEMP}/head.txt"
+
+      # benchstat's CSV has one table per unit. In the sec/op table, column 6
+      # is the change ("+12.34%", or "~" when not significant) and column 7
+      # "p=0.002 n=6"; the p-value is checked here as well.
+      - name: Compare
+        if: steps.base.outputs.tag != ''
+        env:
+          TAG: ${{ steps.base.outputs.tag }}
+          MONTH: ${{ steps.dbip.outputs.month }}
+        run: |
+          cd "$RUNNER_TEMP"
+          if ! grep -q '^BenchmarkLookup/' head.txt; then
+            echo "::error::this commit produced no BenchmarkLookup results"
+            exit 1
+          fi
+          if ! grep -q '^BenchmarkLookup/' base.txt; then
+            echo "::notice::${TAG} has no BenchmarkLookup; nothing to compare"
+            echo "${TAG} has no \`BenchmarkLookup\`: nothing to compare." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          bin/benchstat "${TAG}=base.txt" "head=head.txt" > table.txt
+          bin/benchstat -format csv "${TAG}=base.txt" "head=head.txt" > table.csv 2> /dev/null
+          cat table.txt
+          awk -F, -v limit="$MAX_SLOWDOWN" -v alpha="$ALPHA" '
+            $2 == "sec/op" && $3 == "CI" { t = 1; next }
+            NF == 0 { t = 0; next }
+            t && $1 ~ /^Lookup\// && $6 ~ /^[+-][0-9.]+%$/ && match($7, /p=[0-9.]+/) {
+              d = substr($6, 1, length($6) - 1) + 0
+              p = substr($7, RSTART + 2, RLENGTH - 2) + 0
+              if (d > limit + 0 && p < alpha + 0) printf "%s: %s (p=%s)\n", $1, $6, p
+            }' table.csv > regressions.txt
+          {
+            echo "### Lookup: ${TAG} vs this commit"
+            echo
+            echo "DB-IP IP-to-City Lite ${MONTH}, \`-benchtime=1s -count=6\`, both on this runner."
+            echo "The job fails when a \`Lookup/\` row is more than ${MAX_SLOWDOWN}% slower with p < ${ALPHA}."
+            echo
+            echo '```'
+            cat table.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ -s regressions.txt ]; then
+            { echo; echo "**Slower than ${TAG}:**"; echo; sed 's/^/- /' regressions.txt; } >> "$GITHUB_STEP_SUMMARY"
+            while IFS= read -r line; do
+              echo "::error::slower than ${TAG}: ${line}"
+            done < regressions.txt
+            exit 1
+          fi
+          echo "No lookup is more than ${MAX_SLOWDOWN}% slower than ${TAG}." >> "$GITHUB_STEP_SUMMARY"
