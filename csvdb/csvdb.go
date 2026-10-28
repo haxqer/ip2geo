@@ -12,8 +12,8 @@
 //
 // The source is read in one pass and is never held in memory: the build
 // keeps the merged ranges and one copy of each distinct record. The 690 MB
-// DB-IP City Lite CSV builds (ProfileCity) in about 2.7 s with a peak of
-// about 520 MiB, against 1.6 s and 400 MiB from its .mmdb (Apple M3). Rows
+// DB-IP City Lite CSV builds (ProfileCity) in about 3 s with a peak of
+// about 510 MiB, against 1.5 s and 380 MiB from its .mmdb (Apple M3). Rows
 // must be in ascending address order and must not overlap, as the vendors
 // write them; a file that breaks this, or any other malformed row, fails
 // with ErrSyntax and the file and line, rather than giving a database with
