@@ -1,4 +1,4 @@
-package mmdb
+package build
 
 import (
 	"fmt"
@@ -87,7 +87,7 @@ func checkStrings(src string, strs []string, nU16 int) error {
 	var blob uint64
 	for _, s := range strs {
 		if len(s) > math.MaxUint16 {
-			return fmt.Errorf("mmdb: %q: string of %d bytes (max %d) starting %.40q: %w",
+			return fmt.Errorf("%q: string of %d bytes (max %d) starting %.40q: %w",
 				src, len(s), math.MaxUint16, s, ErrStringTooLong)
 		}
 		blob += uint64(len(s))
@@ -101,13 +101,13 @@ func checkStrings(src string, strs []string, nU16 int) error {
 func checkStringCounts(src string, nStrings, nU16 int, blob uint64) error {
 	switch {
 	case nU16 > maxU16Strings:
-		return fmt.Errorf("mmdb: %q: %d distinct strings in country, continent, region and time zone fields "+
+		return fmt.Errorf("%q: %d distinct strings in country, continent, region and time zone fields "+
 			"(max %d; they are stored as 16-bit ids): %w", src, nU16-1, maxU16Strings-1, ErrTooManyStrings)
 	case nStrings > maxStrings:
-		return fmt.Errorf("mmdb: %q: %d distinct strings (max %d; city names are stored as 24-bit ids): %w",
+		return fmt.Errorf("%q: %d distinct strings (max %d; city names are stored as 24-bit ids): %w",
 			src, nStrings, maxStrings, ErrTooManyStrings)
 	case blob > maxStrBlob:
-		return fmt.Errorf("mmdb: %q: %d bytes of strings (max %d): %w", src, blob, uint64(maxStrBlob), ErrTooManyStrings)
+		return fmt.Errorf("%q: %d bytes of strings (max %d): %w", src, blob, uint64(maxStrBlob), ErrTooManyStrings)
 	}
 	return nil
 }

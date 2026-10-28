@@ -1,9 +1,8 @@
 package mmdb
 
 import (
-	"math"
-
 	"github.com/haxqer/ip2geo"
+	"github.com/haxqer/ip2geo/internal/build"
 	"github.com/oschwald/maxminddb-golang/v2"
 )
 
@@ -39,6 +38,9 @@ type srcRecord struct {
 	// Read with DecodePath by srcDecoder: the names in one language, and
 	// the first (largest) subdivision.
 	countryName, regionISO, regionName, cityName string
+
+	// names backs the name slices of the build.Record made by record.
+	names [3]string
 }
 
 // srcDecoder reads source data records for one profile and language. It
@@ -91,27 +93,20 @@ func (d *srcDecoder) decode(res maxminddb.Result, r *srcRecord) error {
 	return nil
 }
 
-// key returns the record key of r for profile p, with provisional string
-// ids. It interns the strings in a fixed order, so string ids depend only on
-// the order in which records are first seen, and marks every string but the
-// city name as used by a 16-bit field.
-func (r *srcRecord) key(p ip2geo.Profile, scale float64, strs *interner) recKey {
-	var k recKey
-	k.countryISO = strs.id16(r.Country.ISOCode)
-	k.countryName = strs.id16(r.countryName)
-	k.continent = strs.id16(r.Continent.Code)
-	k.countryGeo = r.Country.GeoNameID
-	if p >= ip2geo.ProfileRegion {
-		k.regionISO = strs.id16(r.regionISO)
-		k.regionName = strs.id16(r.regionName)
+// record converts r to the build core's record. The name slices point
+// into r, which must outlive out's use.
+func (r *srcRecord) record(out *build.Record) {
+	r.names = [3]string{r.countryName, r.regionName, r.cityName}
+	*out = build.Record{
+		Continent: build.Continent{Code: r.Continent.Code},
+		Country: build.Country{
+			ISOCode: r.Country.ISOCode, Names: r.names[0:1], GeoNameID: r.Country.GeoNameID,
+		},
+		City: build.City{Names: r.names[2:3], GeoNameID: r.City.GeoNameID},
+		Location: build.Location{
+			Latitude: r.Location.Lat, Longitude: r.Location.Lon,
+			AccuracyRadius: r.Location.Acc, TimeZone: r.Location.TZ,
+		},
 	}
-	if p >= ip2geo.ProfileCity {
-		k.cityName = strs.id(r.cityName)
-		k.cityGeo = r.City.GeoNameID
-		k.lat = int32(math.Round(r.Location.Lat * scale))
-		k.lon = int32(math.Round(r.Location.Lon * scale))
-		k.acc = r.Location.Acc
-		k.tz = strs.id16(r.Location.TZ)
-	}
-	return k
+	out.Subdivisions[0] = build.Subdivision{ISOCode: r.regionISO, Names: r.names[1:2]}
 }

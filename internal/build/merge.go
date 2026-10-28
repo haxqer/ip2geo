@@ -1,4 +1,4 @@
-package mmdb
+package build
 
 import (
 	"bytes"
@@ -57,7 +57,7 @@ func (l *blockList[T]) at(i int) T { return l.blocks[i/blockLen][i%blockLen] }
 // merger4 turns IPv4 networks into sorted range boundaries as they arrive:
 // adjacent networks with the same record merge into one run, and a run that
 // is followed by a gap ends with a rec-0 boundary. Networks must not overlap
-// and must not use rec 0, which buildData reserves for gaps.
+// and must not use rec 0, which Builder reserves for gaps.
 //
 // maxminddb's Networks yields networks in ascending order, so the merge
 // normally runs in a single pass and never holds the networks themselves.

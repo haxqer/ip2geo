@@ -1,4 +1,4 @@
-package mmdb
+package build
 
 import (
 	"encoding/binary"
@@ -60,7 +60,7 @@ func encode(opts *Options, br *buildResult) ([]byte, error) {
 		end = dir[i].Offset + s.length
 	}
 	if end > math.MaxInt {
-		return nil, fmt.Errorf("mmdb: encode: the database would be %d bytes, more than this platform can address", end)
+		return nil, fmt.Errorf("encode: the database would be %d bytes, more than this platform can address", end)
 	}
 
 	// make zeroes the buffer, so the reserved bytes and the padding between
@@ -68,7 +68,7 @@ func encode(opts *Options, br *buildResult) ([]byte, error) {
 	buf := make([]byte, end)
 	hdr := format.Header{Profile: uint8(opts.Profile), LatScale: opts.LatScale, IDWidth: idW, SectionCount: uint32(len(secs))}
 	if n := len(hdr.AppendTo(buf[:0:format.HeaderSize])); n != format.HeaderSize {
-		return nil, fmt.Errorf("mmdb: encode: header: wrote %d bytes, want %d", n, format.HeaderSize)
+		return nil, fmt.Errorf("encode: header: wrote %d bytes, want %d", n, format.HeaderSize)
 	}
 	for i, s := range secs {
 		e := &dir[i]
@@ -77,7 +77,7 @@ func encode(opts *Options, br *buildResult) ([]byte, error) {
 		// overwriting the next section.
 		b := buf[e.Offset : e.Offset+e.Length : e.Offset+e.Length]
 		if n := uint64(len(s.fill(b[:0]))); n != e.Length {
-			return nil, fmt.Errorf("mmdb: encode: section %d: wrote %d bytes, computed %d", s.id, n, e.Length)
+			return nil, fmt.Errorf("encode: section %d: wrote %d bytes, computed %d", s.id, n, e.Length)
 		}
 		e.CRC = format.Checksum(b)
 	}
@@ -86,7 +86,7 @@ func encode(opts *Options, br *buildResult) ([]byte, error) {
 		d = e.AppendTo(d)
 	}
 	if uint64(format.HeaderSize+len(d)) != dirEnd {
-		return nil, fmt.Errorf("mmdb: encode: directory: wrote %d bytes, want %d", len(d), dirEnd-format.HeaderSize)
+		return nil, fmt.Errorf("encode: directory: wrote %d bytes, want %d", len(d), dirEnd-format.HeaderSize)
 	}
 	return buf, nil
 }

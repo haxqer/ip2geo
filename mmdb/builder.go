@@ -26,31 +26,24 @@
 package mmdb
 
 import (
-	"encoding/binary"
 	"fmt"
-	"math"
-	"os"
-	"path/filepath"
-	"runtime/debug"
 	"slices"
 	"strings"
-	"sync"
 	"time"
-	"unicode/utf8"
 
 	"github.com/haxqer/ip2geo"
-	"github.com/haxqer/ip2geo/internal/format"
+	"github.com/haxqer/ip2geo/internal/build"
 	"github.com/oschwald/maxminddb-golang/v2"
 )
 
 const (
 	// DefaultLatScale is the number of latitude/longitude decimals that
 	// ProfileCity keeps when Options.LatScale is 0 (about 11 m).
-	DefaultLatScale = 4
+	DefaultLatScale = build.DefaultLatScale
 	// MaxLatScale is the largest accepted Options.LatScale. Coordinates are
 	// stored as round(x * 10^LatScale) in an int32, which overflows for
 	// |x| > 21.47 from a scale of 8 on.
-	MaxLatScale = 7
+	MaxLatScale = build.MaxLatScale
 )
 
 // Options controls a build. The zero value builds a ProfileCountry database
@@ -136,72 +129,29 @@ type Stats struct {
 }
 
 // String renders the stats for logging.
-func (s Stats) String() string {
-	return fmt.Sprintf("profile=%s networks=%d distinct=%d records=%d strings=%d v4ranges=%d v6ranges=%d size=%.2fMB",
-		s.Profile, s.Networks, s.DistinctRecords, s.Records, s.Strings, s.V4Ranges, s.V6Ranges,
-		float64(s.Bytes)/1024/1024)
-}
+func (s Stats) String() string { return build.Stats(s).String() }
 
-// recKey is a record: its string ids and its other fields.
-type recKey struct {
-	countryISO, countryName, continent, regionISO, regionName, cityName, tz uint32
-	countryGeo, cityGeo                                                     uint32
-	lat, lon                                                                int32
-	acc                                                                     uint16
-}
-
-// buildResult is what encode writes. The string ids in recs and meta are
-// the final ones, indices into strs.
-type buildResult struct {
-	strs     []string
-	recs     blockList[recKey]
-	v4b      blockList[boundary4]
-	v6b      blockList[boundary6]
-	meta     format.Meta
-	networks int
-	distinct int // distinct source data records (data offsets)
-}
-
-// normalize validates o and fills in the defaults. It does no I/O.
-func (o *Options) normalize() error {
-	switch o.Profile {
-	case ip2geo.ProfileCountry, ip2geo.ProfileRegion, ip2geo.ProfileCity:
-	default:
-		return fmt.Errorf("mmdb: unknown Profile %d (want ProfileCountry, ProfileRegion or ProfileCity): %w",
-			o.Profile, ErrOptions)
+// coreOptions validates o and returns the options of the build core. It
+// does no I/O.
+func (o *Options) coreOptions() (build.Options, error) {
+	lang := o.Lang
+	if lang == "" {
+		lang = "en"
 	}
-	if o.LatScale > MaxLatScale {
-		return fmt.Errorf("mmdb: LatScale %d is above %d (coordinates would overflow int32): %w",
-			o.LatScale, MaxLatScale, ErrOptions)
+	co := build.Options{
+		Profile: o.Profile, Languages: []string{lang}, LatScale: o.LatScale,
+		BuildTime: o.BuildTime, Description: o.Description,
 	}
-	if o.BuildTime.IsZero() {
-		o.BuildTime = time.Now()
+	if err := co.Normalize(); err != nil {
+		return build.Options{}, fmt.Errorf("mmdb: %w", err)
 	}
-	if o.BuildTime.Unix() < 0 {
-		return fmt.Errorf("mmdb: BuildTime %s is before 1970: %w", o.BuildTime.UTC().Format(time.RFC3339), ErrOptions)
-	}
-	o.BuildTime = o.BuildTime.UTC().Truncate(time.Second)
-	if len(o.Description) > math.MaxUint16 {
-		return fmt.Errorf("mmdb: Description is %d bytes, more than %d: %w", len(o.Description), math.MaxUint16, ErrOptions)
-	}
-	if !utf8.ValidString(o.Description) {
-		return fmt.Errorf("mmdb: Description %.40q is not valid UTF-8: %w", o.Description, ErrOptions)
-	}
-	if o.Lang == "" {
-		o.Lang = "en"
-	}
-	if o.Profile != ip2geo.ProfileCity {
-		o.LatScale = 0 // no coordinates are stored, so the header says so
-	} else if o.LatScale == 0 {
-		o.LatScale = DefaultLatScale
-	}
-	return nil
+	return co, nil
 }
 
 // checkSource rejects source databases the builder cannot convert: anything
 // that is not a City, Country or Enterprise database, a Country database with
 // a profile that needs city data, and a language the database does not have.
-func checkSource(md *maxminddb.Metadata, src string, opts *Options) error {
+func checkSource(md *maxminddb.Metadata, src string, opts *build.Options) error {
 	typ := md.DatabaseType
 	hasCity := strings.Contains(typ, "City") || strings.Contains(typ, "Enterprise")
 	if !hasCity && !strings.Contains(typ, "Country") {
@@ -212,161 +162,79 @@ func checkSource(md *maxminddb.Metadata, src string, opts *Options) error {
 		return fmt.Errorf("mmdb: profile %s needs a City database, %q has database type %q: %w",
 			opts.Profile, src, typ, ErrDatabaseType)
 	}
-	if len(md.Languages) > 0 && !slices.Contains(md.Languages, opts.Lang) {
-		return fmt.Errorf("mmdb: language %q is not in %q (available: %s): %w",
-			opts.Lang, src, strings.Join(md.Languages, ", "), ErrLanguage)
+	for _, lang := range opts.Languages {
+		if len(md.Languages) > 0 && !slices.Contains(md.Languages, lang) {
+			return fmt.Errorf("mmdb: language %q is not in %q (available: %s): %w",
+				lang, src, strings.Join(md.Languages, ", "), ErrLanguage)
+		}
 	}
 	return nil
 }
 
-// modulePath is the path of the module the builder is part of.
-const modulePath = "github.com/haxqer/ip2geo"
+// buildFile reads srcMMDB and returns the encoded database, in one buffer of
+// exactly its size, and the build's stats.
+func buildFile(srcMMDB string, opts *Options) ([]byte, build.Stats, error) {
+	co, err := opts.coreOptions()
+	if err != nil {
+		return nil, build.Stats{}, err
+	}
+	b, err := readSource(srcMMDB, co)
+	if err != nil {
+		return nil, build.Stats{}, err
+	}
+	// The source is closed (and unmapped) by now, before the encoder
+	// allocates the file.
+	buf, st, err := b.Finish()
+	if err != nil {
+		return nil, build.Stats{}, fmt.Errorf("mmdb: %w", err)
+	}
+	return buf, st, nil
+}
 
-// builderName is the builder string recorded in META: "ip2geo/" and the
-// version of this module in the running binary (a release tag, a
-// pseudo-version, or "(devel)"), or just "ip2geo" when the binary carries
-// no build information.
-var builderName = sync.OnceValue(func() string {
-	bi, ok := debug.ReadBuildInfo()
-	if !ok {
-		return "ip2geo"
-	}
-	mod := &bi.Main
-	if mod.Path != modulePath {
-		mod = nil
-		for _, d := range bi.Deps {
-			if d.Path == modulePath {
-				mod = d
-				break
-			}
-		}
-	}
-	if mod == nil {
-		return "ip2geo"
-	}
-	v := mod.Version
-	if mod.Replace != nil {
-		v = mod.Replace.Version
-	}
-	if v == "" {
-		v = "(devel)"
-	}
-	return "ip2geo/" + v
-})
-
-func buildData(srcMMDB string, opts *Options) (*buildResult, error) {
-	if err := opts.normalize(); err != nil {
-		return nil, err
-	}
-
+// readSource feeds every network of srcMMDB to a new build with co.
+func readSource(srcMMDB string, co build.Options) (*build.Builder, error) {
 	db, err := maxminddb.Open(srcMMDB)
 	if err != nil {
 		return nil, fmt.Errorf("mmdb: open %q: %w", srcMMDB, err)
 	}
 	defer db.Close()
-	if err := checkSource(&db.Metadata, srcMMDB, opts); err != nil {
+	if err := checkSource(&db.Metadata, srcMMDB, &co); err != nil {
 		return nil, err
 	}
-	scale := math.Pow10(int(opts.LatScale))
-
-	strs := newInterner()
-	// The META strings are ordinary strings of the table. Interned first,
-	// they come right after the strings of 16-bit fields (or among them,
-	// when a 16-bit field uses the same string).
-	meta := format.Meta{
-		BuildTime:   uint64(opts.BuildTime.Unix()),
-		SourceTime:  uint64(db.Metadata.BuildEpoch),
-		SourceType:  strs.id(db.Metadata.DatabaseType),
-		Language:    strs.id(opts.Lang),
-		Description: strs.id(opts.Description),
-		Builder:     strs.id(builderName()),
+	b, err := build.New(co, build.Source{
+		Name: srcMMDB, Type: db.Metadata.DatabaseType, BuildEpoch: uint64(db.Metadata.BuildEpoch),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("mmdb: %w", err)
 	}
-	// Record id 0 is reserved for gaps (addresses without data) and is never
-	// handed to a network: a network whose kept fields are all empty gets its
-	// own non-zero id, so the reader reports it as found.
-	recKeys := map[recKey]uint32{}
-	var recs blockList[recKey]
-	recs.push(recKey{})
 
 	// Networks share data records (GeoIP2-City: 10.2M networks, 0.9M
 	// records), so each data offset is decoded once and mapped to its record
 	// id. Records are still numbered, and strings interned, in the order the
 	// networks first reach them, so the output does not change.
 	byOffset := map[uintptr]uint32{}
-	dec := newSrcDecoder(opts.Profile, opts.Lang)
+	dec := newSrcDecoder(co.Profile, co.Languages[0])
 	var src srcRecord
-
-	var v4 merger4
-	var v6 merger6
-	networks := 0
+	var rec build.Record
 
 	for result := range db.Networks() {
 		// Check the error first: a failed result carries no valid offset.
 		if err := result.Err(); err != nil {
 			return nil, fmt.Errorf("mmdb: %q: decode network %s: %w", srcMMDB, result.Prefix(), err)
 		}
-		networks++
-
 		off := result.Offset()
 		recID, ok := byOffset[off]
 		if !ok {
 			if err := dec.decode(result, &src); err != nil {
 				return nil, fmt.Errorf("mmdb: %q: decode network %s: %w", srcMMDB, result.Prefix(), err)
 			}
-			k := src.key(opts.Profile, scale, strs)
-			if recID, ok = recKeys[k]; !ok {
-				recID = uint32(recs.n)
-				recKeys[k] = recID
-				recs.push(k)
-			}
+			src.record(&rec)
+			recID = b.Record(&rec)
 			byOffset[off] = recID
 		}
-
-		pfx := result.Prefix()
-		addr := pfx.Addr()
-		if addr.Is4() || addr.Is4In6() {
-			a := addr.As4()
-			start := binary.BigEndian.Uint32(a[:])
-			bits := pfx.Bits()
-			if addr.Is4In6() {
-				bits -= 96
-			}
-			last := start | uint32((uint64(1)<<(32-bits))-1)
-			v4.add(range4{start: start, last: last, rec: recID})
-		} else {
-			s16 := addr.As16()
-			v6.add(range6{start: s16, last: lastV6(s16, pfx.Bits()), rec: recID})
-		}
+		b.AddPrefix(result.Prefix(), recID)
 	}
-
-	// Renumber the strings so that those of 16-bit fields come first, and
-	// the records and META with them.
-	list, remap, nU16 := strs.finish()
-	if err := checkStrings(srcMMDB, list, nU16); err != nil {
-		return nil, err
-	}
-	for _, blk := range recs.blocks {
-		for i := range blk {
-			k := &blk[i]
-			k.countryISO, k.countryName, k.continent = remap[k.countryISO], remap[k.countryName], remap[k.continent]
-			k.regionISO, k.regionName = remap[k.regionISO], remap[k.regionName]
-			k.cityName, k.tz = remap[k.cityName], remap[k.tz]
-		}
-	}
-	meta.SourceType, meta.Language = remap[meta.SourceType], remap[meta.Language]
-	meta.Description, meta.Builder = remap[meta.Description], remap[meta.Builder]
-	meta.Networks = uint64(networks)
-	meta.DistinctRecords = uint32(len(byOffset))
-
-	return &buildResult{
-		strs:     list,
-		recs:     recs,
-		v4b:      v4.finish(),
-		v6b:      v6.finish(),
-		meta:     meta,
-		networks: networks,
-		distinct: len(byOffset),
-	}, nil
+	return b, nil
 }
 
 // Open builds the compact database in memory directly from a MaxMind City
@@ -382,12 +250,7 @@ func buildData(srcMMDB string, opts *Options) (*buildResult, error) {
 // and the underlying error (for example fs.ErrNotExist) when the source
 // cannot be read.
 func Open(srcMMDB string, opts Options) (*ip2geo.Reader, error) {
-	br, err := buildData(srcMMDB, &opts)
-	if err != nil {
-		return nil, err
-	}
-	// encode writes one buffer of the exact size, not a growing one.
-	buf, err := encode(&opts, br)
+	buf, _, err := buildFile(srcMMDB, &opts)
 	if err != nil {
 		return nil, err
 	}
@@ -411,58 +274,13 @@ func Open(srcMMDB string, opts Options) (*ip2geo.Reader, error) {
 //
 // Errors are reported as for Open.
 func Build(srcMMDB, outPath string, opts Options) (*Stats, error) {
-	br, err := buildData(srcMMDB, &opts)
+	buf, st, err := buildFile(srcMMDB, &opts)
 	if err != nil {
 		return nil, err
 	}
-	buf, err := encode(&opts, br)
-	if err != nil {
-		return nil, err
+	if err := build.WriteFileAtomic(outPath, buf); err != nil {
+		return nil, fmt.Errorf("mmdb: %w", err)
 	}
-	if err := writeFileAtomic(outPath, buf); err != nil {
-		return nil, err
-	}
-	return &Stats{
-		Profile: opts.Profile, Networks: br.networks, DistinctRecords: br.distinct, Records: br.recs.n,
-		Strings: len(br.strs), V4Ranges: br.v4b.n, V6Ranges: br.v6b.n, Bytes: int64(len(buf)),
-	}, nil
-}
-
-// writeFileAtomic writes data to path through a temporary file in the same
-// directory that is renamed over path only after write, sync and close
-// succeed.
-func writeFileAtomic(path string, data []byte) (err error) {
-	perm := os.FileMode(0o644)
-	if fi, statErr := os.Stat(path); statErr == nil && fi.Mode().IsRegular() {
-		perm = fi.Mode().Perm()
-	}
-	dir := filepath.Dir(path)
-	f, err := os.CreateTemp(dir, ".geoc-*")
-	if err != nil {
-		return fmt.Errorf("mmdb: create temporary file in %q: %w", dir, err)
-	}
-	tmp := f.Name()
-	defer func() {
-		if err != nil {
-			f.Close() // already closed on the rename path; the error is moot
-			os.Remove(tmp)
-		}
-	}()
-
-	if _, err = f.Write(data); err != nil {
-		return fmt.Errorf("mmdb: write %q: %w", tmp, err)
-	}
-	if err = f.Chmod(perm); err != nil {
-		return fmt.Errorf("mmdb: chmod %q: %w", tmp, err)
-	}
-	if err = f.Sync(); err != nil {
-		return fmt.Errorf("mmdb: sync %q: %w", tmp, err)
-	}
-	if err = f.Close(); err != nil {
-		return fmt.Errorf("mmdb: close %q: %w", tmp, err)
-	}
-	if err = os.Rename(tmp, path); err != nil {
-		return fmt.Errorf("mmdb: replace %q: %w", path, err)
-	}
-	return nil
+	s := Stats(st)
+	return &s, nil
 }

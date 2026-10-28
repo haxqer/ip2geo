@@ -1,4 +1,4 @@
-package mmdb
+package build
 
 import (
 	"cmp"
