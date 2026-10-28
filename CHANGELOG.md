@@ -7,6 +7,30 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- Format revision 2.1 (docs/FORMAT.md): optional XFIELDS, XRECORDS and LANGS
+  sections and an ASN profile. A file built without optional fields and with
+  one language has none of them and is byte-for-byte a v0.2 file; v0.2
+  readers ignore the new sections, but reject ASN files.
+- Optional field sets, `mmdb.Options.Fields` and `ip2geo build -fields`: EU
+  membership, continent name and GeoNames id, registered and represented
+  country, the first subdivision's GeoNames id and the second subdivision,
+  postal code, metro code, the anycast / anonymous proxy / satellite traits,
+  and whether the coordinates and accuracy radius are present.
+- Several languages per file, `mmdb.Options.Languages` and
+  `ip2geo build -lang en,de,ja`: a name missing in a language falls back to
+  the primary one. `ip2geo.Language` chooses the language at open,
+  `Reader.WithLanguage` returns a view in another language, and
+  `Reader.Languages` lists them; `ip2geo.ErrLanguage` reports a language the
+  file does not have.
+- ASN databases (GeoLite2-ASN, DB-IP ASN Lite): `ip2geo.ProfileASN`,
+  `ip2geo build -profile asn` and `Reader.ASN`.
+- `Reader.LookupDetails` returns a `Details`: the `Record` plus every optional
+  field and the ASN. `Reader.LookupRange` returns the range of addresses that
+  share an answer, and `Reader.Ranges` iterates over every covered range.
+  None of them allocate except `Ranges`' iterator; `Lookup` is unchanged.
+- `Reader.Fields` and `Metadata.Fields` report the file's field sets;
+  `ip2geo info` prints the field sets and languages, and `ip2geo lookup`
+  prints the optional fields and takes `-lang`.
 - Package `csvdb` builds from CSV sources: DB-IP's IP to City, Country and
   ASN Lite CSV files and IP2Location's DB1, DB3, DB5, DB9, DB11 and ASN CSV
   files (IPv4 or IPv6, gzipped or not), with `Open` and `Build` like package
@@ -16,6 +40,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   documentation).
 - `ip2geo build -format mmdb|dbip-city|dbip-country|dbip-asn|ip2location|ip2location-asn`;
   the default comes from the `-src` name (`*.mmdb`, `dbip-*-lite*.csv[.gz]`).
+- `scripts/size-table.sh` regenerates the README size table (every profile,
+  field set and language option, from one DB-IP Lite month); CI checks it.
+- Each monthly `data-YYYY-MM` release also carries the DB-IP Lite City,
+  Country and ASN `.mmdb` files it was built from.
+
+### Changed
+- `mmdb.Options.Lang` is deprecated in favour of `Languages`; setting both is
+  an error.
+- The source-agnostic part of the builder moved to an internal package shared
+  by `mmdb` and `csvdb`; `mmdb`'s API and output are unchanged.
 
 ## [0.2.0] - 2026-10-28
 

@@ -126,17 +126,24 @@ ip2geo build -src GeoIP2-City.mmdb -out city.geoc                        # full 
 ip2geo build -src GeoIP2-City.mmdb -out country.geoc -profile country    # smaller, country only
 ip2geo build -src GeoIP2-City.mmdb -out city.geoc -latscale 2            # keep 2 coordinate decimals
 ip2geo build -src GeoIP2-City.mmdb -out city.geoc -description "GeoIP2-City 2026-10-27"
+ip2geo build -src GeoIP2-City.mmdb -out city.geoc -fields postal,registered  # optional fields
+ip2geo build -src GeoIP2-City.mmdb -out city.geoc -lang en,de,ja         # names in 3 languages
+ip2geo build -src GeoLite2-ASN.mmdb -out asn.geoc -profile asn           # ASN database
+ip2geo build -src dbip-city-lite-2026-10.csv.gz -out city.geoc           # from a CSV
 
 ip2geo lookup -db city.geoc 81.2.69.142 2001:4860:4860::8888
+ip2geo lookup -db city.geoc -lang de 81.2.69.142   # names in another language of the file
 ip2geo info   -db city.geoc    # size, format, profile, source, build time, description, counts
 ```
 
 | flag | meaning | default |
 |---|---|---|
-| `-src` | input MaxMind/DB-IP City `.mmdb` | (required) |
+| `-src` | input MaxMind/DB-IP `.mmdb`, or a DB-IP / IP2Location CSV (optionally `.gz`) | (required) |
+| `-format` | `mmdb` \| `dbip-city` \| `dbip-country` \| `dbip-asn` \| `ip2location` \| `ip2location-asn` | from the `-src` name |
 | `-out` | output `.geoc` path | `city.geoc` |
-| `-profile` | `city` \| `region` \| `country` | `city` |
-| `-lang` | language of names; must be one the source lists | `en` |
+| `-profile` | `city` \| `region` \| `country` \| `asn` | `city` |
+| `-fields` | optional field sets, comma-separated: `eu`, `continent`, `registered`, `subdivisions`, `postal`, `metro`, `traits`, `location`, or `all` | none |
+| `-lang` | languages of names, comma-separated, primary first; each must be one the source lists | `en` |
 | `-latscale` | coordinate precision: lat/lon decimals kept by the city profile, 0..7 (0 means 4) | `4` |
 | `-description` | free text stored in the file's metadata, shown by `ip2geo info` | empty |
 
@@ -145,6 +152,12 @@ ip2geo info   -db city.geoc    # size, format, profile, source, build time, desc
 ```go
 mmdb.Build("GeoIP2-City.mmdb", "city.geoc", mmdb.Options{Profile: ip2geo.ProfileCity})
 ```
+
+Optional field sets and extra languages make the file larger (the table below
+has the numbers); without them the file is byte-for-byte what v0.2 wrote. CSV
+sources go through package `csvdb` the same way (`csvdb.Build`, `csvdb.Open`);
+a DB-IP CSV build answers like the same month's `.mmdb` build, apart from a
+few places where DB-IP's two files differ (see the package documentation).
 
 **Load the result** anywhere, with zero third-party dependencies:
 
@@ -200,18 +213,27 @@ The `.geoc` format is specified in [`docs/FORMAT.md`](docs/FORMAT.md).
 ```go
 // build a reader
 db, err := mmdb.Open(mmdbPath, opts)                    // from a MaxMind .mmdb, in memory (about 2 s)
+db, err := csvdb.Open(csvPath, opts)                    // from a DB-IP or IP2Location CSV, in memory
 db, err := ip2geo.Open(geocPath)                        // from a pre-built .geoc, memory-mapped (zero deps)
 db, err := ip2geo.Open(geocPath, ip2geo.NoMmap())       // read into the heap instead
 db, err := ip2geo.Open(geocPath, ip2geo.SkipChecksum()) // skip the CRC-32C pass at open
 db, err := ip2geo.OpenBytes(b)                          // from a .geoc already in memory (copied)
 db, err := ip2geo.OpenBytes(b, ip2geo.NoCopy())         // used in place: b must not change afterwards
+db, err := ip2geo.Open(geocPath, ip2geo.Language("de")) // names in one of the file's languages
 
 // look up
 rec, ok := db.Lookup(ip netip.Addr)   // ok == false means "not found"
 rec, ok := db.City(ip)                // alias of Lookup (geoip2-golang style)
 rec, ok := db.Country(ip)             // alias of Lookup
+d, ok := db.LookupDetails(ip)         // Record plus the optional field sets and the ASN
+as, ok := db.ASN(ip)                  // autonomous system number and organization (asn profile)
+rng, ok := db.LookupRange(ip)         // the first and last address that share ip's answer
+for rng, d := range db.Ranges() { … } // every covered range in address order
 
-db.Profile()                          // country | region | city
+de, err := db.WithLanguage("de")      // a view of the same database with German names
+db.Languages()                        // the file's languages, primary first
+db.Fields()                           // the optional field sets the file holds
+db.Profile()                          // country | region | city | asn
 db.Metadata()                         // format, source, build time, description, counts (CLI: ip2geo info)
 db.Close()                            // a no-op today
 ```
@@ -227,8 +249,12 @@ db.Close()                            // a no-op today
   a CRC-32C per section, and return errors wrapping `ip2geo.ErrBadMagic`,
   `ErrUnsupportedVersion`, `ErrCorrupt` or `ErrTooLarge` (over 2 GiB).
   `mmdb.Open` and `mmdb.Build` wrap `mmdb.ErrOptions`, `ErrDatabaseType`,
-  `ErrLanguage`, `ErrStringTooLong` or `ErrTooManyStrings`. Test for them with
-  `errors.Is`.
+  `ErrLanguage`, `ErrStringTooLong` or `ErrTooManyStrings`; `csvdb` adds
+  `csvdb.ErrSyntax` with the file and line of a malformed row. `Language` and
+  `WithLanguage` wrap `ip2geo.ErrLanguage`. Test for them with `errors.Is`.
+- **Languages.** A file built with `-lang en,de` stores every name in each
+  language. A name the source lacks in the chosen language falls back to the
+  primary one (the first of `-lang`).
 - **IPv4 in IPv6.** As in MaxMind databases, `::ffff:0:0/96` (IPv4-mapped),
   `::/96` (IPv4-compatible), `2002::/16` (6to4) and `2001::/32` (Teredo) are
   looked up in the IPv4 table. NAT64 `64:ff9b::/96` is not mapped, and the zero
@@ -236,10 +262,10 @@ db.Close()                            // a no-op today
 - **Found but empty.** A network that is in the source but has none of the
   chosen profile's fields (for example one with only `registered_country`)
   returns `ok == true` and an empty `Record`, as maxminddb's `Result.Found()`
-  does.
+  does. Built with `-fields registered`, it carries its registered country.
 
-The `ip2geo` reader package imports only the standard library; the
-`ip2geo/mmdb` builder additionally uses `maxminddb`.
+The `ip2geo` reader package and the `ip2geo/csvdb` builder import only the
+standard library; the `ip2geo/mmdb` builder additionally uses `maxminddb`.
 
 ## Reproduce the benchmark
 
