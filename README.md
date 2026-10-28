@@ -31,9 +31,9 @@ region, city, coordinates, accuracy and time zone; `City()` decodes more
 (postal code, every subdivision, registered country, all languages).
 Reproduce it with [`bench/`](bench) — see below.
 
-IPv6 is slower: about 97 ns per city-profile lookup for addresses weighted by
-prefix size, up to ~420–450 ns when every stored range is sampled equally
-(the IPv6 index is coarser; improving it is planned).
+IPv6 lookups inside the source's networks take about 42 ns on the country
+profile and about 260 ns on the city profile, where a few very dense /32
+prefixes dominate the search.
 
 ## Install
 
@@ -66,8 +66,7 @@ IP geolocation by [DB-IP](https://db-ip.com), licensed under CC BY 4.0.
 Point it at the same `.mmdb` you already use with `geoip2-golang`
 ([free GeoLite2-City from MaxMind](https://dev.maxmind.com/geoip/geolite2-free-geolocation-data)).
 `mmdb.Open` builds the fast index in memory — no intermediate file, no CLI —
-but the build is slow (see [below](#convert-an-mmdb--geoc)); servers should
-convert once instead.
+at a cost of about 2 s at startup (see [below](#convert-an-mmdb--geoc)).
 
 ```go
 package main
@@ -105,8 +104,8 @@ That's the whole library. Works the same for IPv6.
 
 ## Convert an `.mmdb` → `.geoc`
 
-`mmdb.Open` rebuilds the index in memory on every start: about 27 s and about
-2.2 GiB of peak memory for the city profile (measured on a 123 MiB GeoIP2-City
+`mmdb.Open` rebuilds the index in memory on every start: about 2 s and about
+350 MiB of peak memory for the city profile (measured on a 123 MiB GeoIP2-City
 source). Convert your MaxMind **or DB-IP** `.mmdb` to a compact `.geoc` **once**
 with `mmdb.Build` (or the CLI), and `ip2geo.Open` then loads it in a fraction of
 a second at every start, using **only the standard library** (no `maxminddb`) —
@@ -163,7 +162,7 @@ decimals (about 11 m) unless `-latscale` says otherwise.
 
 ```go
 // build a reader
-db, err := mmdb.Open(mmdbPath, opts)  // from a MaxMind .mmdb, in memory (slow, see above)
+db, err := mmdb.Open(mmdbPath, opts)  // from a MaxMind .mmdb, in memory (about 2 s)
 db, err := ip2geo.Open(geocPath)      // from a pre-built .geoc (zero deps)
 db, err := ip2geo.OpenBytes(b)        // from a .geoc already in memory
 

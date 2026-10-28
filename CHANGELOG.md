@@ -6,6 +6,21 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+- IPv6 lookups use a two-level jump table (the top 16 bits, then an adaptive
+  number of bits inside each populated bucket) and compare range starts as two
+  64-bit halves: 20–55% faster on IPv6 depending on profile and address set,
+  unchanged on IPv4, still zero allocations.
+- `mmdb.Open` and `mmdb.Build` decode each distinct source record once (keyed
+  by its data offset), decode only the fields and the one language the profile
+  keeps, and merge ranges as they stream in. A city build takes about 2 s and
+  350 MiB of peak memory instead of 27 s and 2.2 GiB; the output is
+  byte-identical.
+
+### Added
+- `mmdb.Stats.DistinctRecords`, also printed as `distinct=` in the CLI's stats
+  line: the number of distinct source records decoded.
+
 ## [0.1.0] - 2026-10-28
 
 ### Added
