@@ -25,7 +25,7 @@ Offsets are from the start of the file.
   | DB-IP City Lite, city profile | 142.0 MB | about 86 MB (−40%) |
 
   The savings come from four measured changes: IPv6 starts stored as their
-  top 64 bits (0.1–0.4% of boundaries need the low half, kept in an exception
+  top 64 bits (0.1–0.6% of boundaries need the low half, kept in an exception
   table), bucket-relative 16-bit IPv4 starts, packed records, and record ids
   as narrow as the record count allows.
 
@@ -58,11 +58,14 @@ then          Sections, each starting at a multiple of 8, zero-padded
 | 8 | u64 | offset | multiple of 8; `offset + length <= file size` |
 | 16 | u64 | length | bytes, excluding padding |
 
-Sections must appear in ascending `offset` order and must not overlap. Every
-id in the table below is required exactly once, except V6EXCIDX/V6EXCLO,
-which may be absent when there are no exceptions (equivalent to length 0).
-A reader ignores entries whose id it does not know, which is how later minor
-revisions may add sections without a version bump.
+Sections must appear in ascending `offset` order, must not overlap, and must
+start after the directory; gaps between sections and bytes after the last
+section are allowed and ignored. Every id in the table below is required
+exactly once, except V6EXCIDX/V6EXCLO, which may be absent when there are no
+exceptions (equivalent to length 0). A reader ignores the contents of entries
+whose id it does not know (such an id may repeat), but still applies the
+position and CRC checks to them; this is how later minor revisions may add
+sections without a version bump.
 
 ### Sections
 
@@ -104,7 +107,7 @@ exactly, `len(V4IDS) == nV4 × idWidth` and `len(V6IDS) == nV6 × idWidth`,
 
 String `i` is `STRBLOB[STRIDX[i] : STRIDX[i+1]]`. `STRIDX[0] == 0`, the
 offsets are non-decreasing, and `STRIDX[nStrings] == len(STRBLOB)`. String 0
-is the empty string. Every string referenced by a u16 record field must have
+is the empty string, so `STRIDX[1] == 0`. Every string referenced by a u16 record field must have
 an id below 65536; the builder therefore assigns ids to all strings used by
 u16 fields before any city name. Any string id in a record or in META must
 be `< nStrings`.
@@ -136,7 +139,7 @@ The IPv4 space is a sorted list of boundary starts; the record of address
 the unique value with `V4IDX[g] <= i < V4IDX[g+1]`.
 
 - `V4IDX[g]` is the index of the first boundary whose absolute start is
-  `>= g << 16`; `V4IDX[65536] == nV4`. Non-decreasing.
+  `>= g << 16`; `V4IDX[0] == 0` and `V4IDX[65536] == nV4`. Non-decreasing.
 - Absolute starts are strictly ascending (so within a bucket the u16 values
   are strictly ascending).
 - No boundary is synthesised at bucket bases. To look up `A` with
@@ -185,17 +188,18 @@ the file size, when any of the following fails:
 
 1. magic, version, profile ∈ {0,1,2}, latScale ≤ 7, idWidth ∈ {1,2,3,4},
    reserved bytes zero;
-2. the directory fits in the file; offsets are multiples of 8, sections are
-   in ascending order, do not overlap, and end within the file;
+2. the directory fits in the file; offsets are multiples of 8, sections start
+   after the directory, are in ascending order, do not overlap, and end within
+   the file (unknown ids included);
 3. every required section is present exactly once and has a valid length;
 4. every section's CRC-32C matches (a reader may offer an option to skip this);
-5. STRIDX is non-decreasing from 0 to `len(STRBLOB)`; META string ids and all
-   record string ids are `< nStrings`, and ids in u16 fields are implicitly
-   so;
+5. STRIDX is non-decreasing from 0 to `len(STRBLOB)` with string 0 empty;
+   META string ids and all record string ids are `< nStrings`, and ids in u16
+   fields are implicitly so;
 6. `nRecords >= 1`, record 0 is all zero, `idWidth` is minimal for
    `nRecords`, and every id in V4IDS/V6IDS is `< nRecords`;
-7. V4IDX is non-decreasing with `V4IDX[65536] == nV4`, and absolute IPv4
-   starts are strictly ascending;
+7. V4IDX is non-decreasing with `V4IDX[0] == 0` and `V4IDX[65536] == nV4`,
+   and absolute IPv4 starts are strictly ascending;
 8. V6STARTS is non-decreasing, V6EXCIDX strictly ascending with every entry
    `< nV6` and a non-zero V6EXCLO, and the 128-bit starts strictly ascending.
 

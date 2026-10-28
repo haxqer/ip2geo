@@ -16,10 +16,53 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   keeps, and merge ranges as they stream in. A city build takes about 2 s and
   350 MiB of peak memory instead of 27 s and 2.2 GiB; the output is
   byte-identical.
+- The builder (`mmdb.Build`, `mmdb.Open` and `ip2geo build`) writes the GEO2
+  format only.
+- `ip2geo.Open` and `OpenBytes` still read GEO1 files written by v0.1.x: they
+  are validated as before and converted to the GEO2 layout in memory at open
+  (about 73 ms for a city file).
+- On the GEO2 layout, city-profile IPv6 lookups are a further 13% faster on
+  addresses inside the source's networks (about 210 ns on GeoIP2-City) and
+  30% faster weighted by range; still zero allocations.
+- `ErrBadMagic`'s text is now "not an ip2geo database" (was "not a GEO1
+  database"); it means the input starts with neither magic.
+- `ErrTooLarge` also reports a GEO1 file whose strings cannot be renumbered
+  into GEO2's string ids (more than 65,535 distinct strings in country, region
+  and time zone fields, or more than 2^24−1 in all).
+- `mmdb.Open` hands its freshly built buffer to the reader instead of copying
+  it.
 
 ### Added
 - `mmdb.Stats.DistinctRecords`, also printed as `distinct=` in the CLI's stats
   line: the number of distinct source records decoded.
+- GEO2, the `.geoc` format version 2, specified in `docs/FORMAT.md`: an 8-byte
+  aligned section directory with a CRC-32C per section, a metadata section,
+  packed records with id widths sized to the record count, bucket-relative
+  16-bit IPv4 starts, and IPv6 starts stored as their top 64 bits with an
+  exception table. Built from a 2024 GeoIP2-City source, the files are
+  1,819,048 bytes for country (−50.8% from GEO1's 3,699,834), 14,032,208 for
+  region (−48.8% from 27,381,167) and 77,234,992 for city (−36.3% from
+  121,270,878); a DB-IP City Lite city file is about 86 MB instead of 142 MB.
+- `Reader.Metadata()` and the `Metadata` type: format version, profile,
+  coordinate scale, build and source times, source type, language,
+  description, builder, network and record counts, string and range counts.
+- `ip2geo.Open` memory-maps GEO2 files on Unix and Windows and reads the
+  tables in place: about 42 ms for a city file with checksums (about 35 ms
+  with `SkipChecksum()`), 2.6 ms for country, and about 9.4 MB of heap for
+  the city file. The mapping is released by the garbage collector once the
+  Reader is unreachable. Options: `NoMmap()` reads the file into the heap
+  instead, `SkipChecksum()` skips the CRC-32C pass, and `NoCopy()` makes
+  `OpenBytes` use the caller's slice in place.
+- `ip2geo info -db FILE` prints a database's size and metadata, one field per
+  line; `ip2geo build -description TEXT` records free text in the metadata.
+- `mmdb.Options.BuildTime`, for reproducible builds (byte-identical output
+  from the same source and options), and `mmdb.Options.Description`.
+- `mmdb.ErrTooManyStrings`, for sources whose strings do not fit GEO2's 16-bit
+  and 24-bit string ids.
+- CI: a `bench` workflow that runs `BenchmarkLookup` on DB-IP IP-to-City Lite
+  at the previous `v*` tag and at the commit, writes the benchstat table to the
+  run summary, and fails when a lookup is more than 10% slower with p < 0.05;
+  and the root package's tests on `windows-latest` and `macos-latest`.
 
 ## [0.1.0] - 2026-10-28
 

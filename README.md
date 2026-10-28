@@ -32,7 +32,7 @@ region, city, coordinates, accuracy and time zone; `City()` decodes more
 Reproduce it with [`bench/`](bench) — see below.
 
 IPv6 lookups inside the source's networks take about 42 ns on the country
-profile and about 260 ns on the city profile, where a few very dense /32
+profile and about 210 ns on the city profile, where a few very dense /32
 prefixes dominate the search.
 
 ## Install
@@ -57,7 +57,9 @@ go run github.com/haxqer/ip2geo/cmd/ip2geo@latest lookup -db dbip-city-lite.geoc
 ```
 
 These `.geoc` files load with **zero third-party dependencies** via
-`ip2geo.Open`. Browse every build on the
+`ip2geo.Open`. The `data-2026-10` files are in the v0.1 format and still
+load; the monthly releases from `data-2026-11` on are GEO2 files (the city
+file uncompressed: about 86 MB instead of 142 MB). Browse every build on the
 [data releases](https://github.com/haxqer/ip2geo/releases) page.
 IP geolocation by [DB-IP](https://db-ip.com), licensed under CC BY 4.0.
 
@@ -107,9 +109,13 @@ That's the whole library. Works the same for IPv6.
 `mmdb.Open` rebuilds the index in memory on every start: about 2 s and about
 350 MiB of peak memory for the city profile (measured on a 123 MiB GeoIP2-City
 source). Convert your MaxMind **or DB-IP** `.mmdb` to a compact `.geoc` **once**
-with `mmdb.Build` (or the CLI), and `ip2geo.Open` then loads it in a fraction of
-a second at every start, using **only the standard library** (no `maxminddb`) —
-ideal for servers that restart often, containers, and CLIs.
+with `mmdb.Build` (or the CLI), and `ip2geo.Open` then memory-maps it at every
+start — about 42 ms for the city file, 2.6 ms for country — using **only the
+standard library** (no `maxminddb`): ideal for servers that restart often,
+containers, and CLIs.
+
+The builder writes the GEO2 format only. Files written by v0.1 (GEO1) still
+open: they are converted in memory, which takes about 73 ms for a city file.
 
 **Command line** — install once, convert any City `.mmdb`:
 
@@ -119,8 +125,10 @@ go install github.com/haxqer/ip2geo/cmd/ip2geo@latest
 ip2geo build -src GeoIP2-City.mmdb -out city.geoc                        # full city detail
 ip2geo build -src GeoIP2-City.mmdb -out country.geoc -profile country    # smaller, country only
 ip2geo build -src GeoIP2-City.mmdb -out city.geoc -latscale 2            # keep 2 coordinate decimals
+ip2geo build -src GeoIP2-City.mmdb -out city.geoc -description "GeoIP2-City 2026-10-27"
 
 ip2geo lookup -db city.geoc 81.2.69.142 2001:4860:4860::8888
+ip2geo info   -db city.geoc    # size, format, profile, source, build time, description, counts
 ```
 
 | flag | meaning | default |
@@ -130,6 +138,7 @@ ip2geo lookup -db city.geoc 81.2.69.142 2001:4860:4860::8888
 | `-profile` | `city` \| `region` \| `country` | `city` |
 | `-lang` | language of names; must be one the source lists | `en` |
 | `-latscale` | coordinate precision: lat/lon decimals kept by the city profile, 0..7 (0 means 4) | `4` |
+| `-description` | free text stored in the file's metadata, shown by `ip2geo info` | empty |
 
 **From Go** — the same conversion, programmatically:
 
@@ -140,7 +149,7 @@ mmdb.Build("GeoIP2-City.mmdb", "city.geoc", mmdb.Options{Profile: ip2geo.Profile
 **Load the result** anywhere, with zero third-party dependencies:
 
 ```go
-db, _ := ip2geo.Open("city.geoc") // sub-second startup
+db, _ := ip2geo.Open("city.geoc") // memory-mapped: about 42 ms for the city file
 rec, ok := db.Lookup(ip)
 ```
 
@@ -151,20 +160,26 @@ faster.
 
 | profile | fields | file size¹ |
 |---|---|--:|
-| `country` | country ISO / name / continent | **3.5 MiB** |
-| `region` | + top subdivision (state/province) | 26 MiB |
-| `city` | + city, coordinates, accuracy, time zone | 116 MiB |
+| `country` | country ISO / name / continent | **1.7 MiB** |
+| `region` | + top subdivision (state/province) | 13.4 MiB |
+| `city` | + city, coordinates, accuracy, time zone | 73.7 MiB |
 
-¹ built from a 123 MiB GeoIP2-City source. The city profile keeps 4 coordinate
-decimals (about 11 m) unless `-latscale` says otherwise.
+¹ built from a 123 MiB GeoIP2-City source; v0.1 files were 3.5 / 26 / 116 MiB.
+The city profile keeps 4 coordinate decimals (about 11 m) unless `-latscale`
+says otherwise.
+
+The `.geoc` format is specified in [`docs/FORMAT.md`](docs/FORMAT.md).
 
 ## API
 
 ```go
 // build a reader
-db, err := mmdb.Open(mmdbPath, opts)  // from a MaxMind .mmdb, in memory (about 2 s)
-db, err := ip2geo.Open(geocPath)      // from a pre-built .geoc (zero deps)
-db, err := ip2geo.OpenBytes(b)        // from a .geoc already in memory
+db, err := mmdb.Open(mmdbPath, opts)                    // from a MaxMind .mmdb, in memory (about 2 s)
+db, err := ip2geo.Open(geocPath)                        // from a pre-built .geoc, memory-mapped (zero deps)
+db, err := ip2geo.Open(geocPath, ip2geo.NoMmap())       // read into the heap instead
+db, err := ip2geo.Open(geocPath, ip2geo.SkipChecksum()) // skip the CRC-32C pass at open
+db, err := ip2geo.OpenBytes(b)                          // from a .geoc already in memory (copied)
+db, err := ip2geo.OpenBytes(b, ip2geo.NoCopy())         // used in place: b must not change afterwards
 
 // look up
 rec, ok := db.Lookup(ip netip.Addr)   // ok == false means "not found"
@@ -172,17 +187,23 @@ rec, ok := db.City(ip)                // alias of Lookup (geoip2-golang style)
 rec, ok := db.Country(ip)             // alias of Lookup
 
 db.Profile()                          // country | region | city
+db.Metadata()                         // format, source, build time, description, counts (CLI: ip2geo info)
 db.Close()                            // a no-op today
 ```
 
 - **Concurrency.** `Lookup` performs **no allocation** and the `*Reader` is safe
   for concurrent use by multiple goroutines. `Close` is a no-op: it may overlap
   in-flight lookups, and the Reader keeps answering after it.
-- **Errors.** `ip2geo.Open` and `OpenBytes` validate the whole file and return
-  errors wrapping `ip2geo.ErrBadMagic`, `ErrUnsupportedVersion`, `ErrCorrupt` or
-  `ErrTooLarge` (over 2 GiB). `mmdb.Open` and `mmdb.Build` wrap
-  `mmdb.ErrOptions`, `ErrDatabaseType`, `ErrLanguage` or `ErrStringTooLong`.
-  Test for them with `errors.Is`.
+- **Memory.** A GEO2 file stays mapped; for the city file `Open` adds about
+  9.4 MB of heap (indexes and strings). The garbage collector unmaps the file
+  once the Reader is unreachable. Never rewrite a mapped file in place: write a
+  new one and rename it over the old, as `mmdb.Build` does.
+- **Errors.** `ip2geo.Open` and `OpenBytes` validate the whole file, including
+  a CRC-32C per section, and return errors wrapping `ip2geo.ErrBadMagic`,
+  `ErrUnsupportedVersion`, `ErrCorrupt` or `ErrTooLarge` (over 2 GiB).
+  `mmdb.Open` and `mmdb.Build` wrap `mmdb.ErrOptions`, `ErrDatabaseType`,
+  `ErrLanguage`, `ErrStringTooLong` or `ErrTooManyStrings`. Test for them with
+  `errors.Is`.
 - **IPv4 in IPv6.** As in MaxMind databases, `::ffff:0:0/96` (IPv4-mapped),
   `::/96` (IPv4-compatible), `2002::/16` (6to4) and `2001::/32` (Teredo) are
   looked up in the IPv4 table. NAT64 `64:ff9b::/96` is not mapped, and the zero
@@ -211,6 +232,10 @@ readers in memory and reports ns/op and allocs/op:
 ```sh
 IP2GEO_TEST_MMDB=/path/to/City.mmdb go test -run '^$' -bench BenchmarkLookup -benchtime=2s ./mmdb/
 ```
+
+CI runs it on DB-IP IP-to-City Lite for pull requests and pushes to `main`,
+also at the previous release, and fails when a lookup is more than 10% slower
+than there (p < 0.05, benchstat).
 
 ## License
 
