@@ -144,6 +144,11 @@ func appendRecords(b []byte, p ip2geo.Profile, width int, recs *blockList[recKey
 // maxStrings (checkStrings).
 func packRecord(rec *[format.RecWidthCity]byte, p ip2geo.Profile, k *recKey) {
 	le := binary.LittleEndian
+	if p == ip2geo.ProfileASN {
+		le.PutUint32(rec[format.RecASNNumber:], k.countryGeo)
+		format.PutUint24(rec[format.RecASNOrg:], k.cityName)
+		return
+	}
 	le.PutUint16(rec[format.RecCountryISO:], uint16(k.countryISO))
 	le.PutUint16(rec[format.RecCountryName:], uint16(k.countryName))
 	le.PutUint16(rec[format.RecContinent:], uint16(k.continent))

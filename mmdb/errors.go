@@ -6,22 +6,26 @@ import "github.com/haxqer/ip2geo/internal/build"
 // "mmdb: " and names the offending value. Test for them with errors.Is.
 var (
 	// ErrDatabaseType reports a source .mmdb whose metadata database_type is
-	// not a City, Country or Enterprise database (for example GeoLite2-ASN or
-	// GeoIP2-ISP), or a Country database used with ProfileRegion or
+	// not a City, Country, Enterprise or ASN database (for example
+	// GeoIP2-ISP); a Country database used with ProfileRegion or
 	// ProfileCity, which need the region and city data only a City (or
-	// Enterprise) database has.
+	// Enterprise) database has; an ASN database used with a geo profile;
+	// or ProfileASN with a database that is not an ASN one.
 	ErrDatabaseType = build.ErrDatabaseType
 
-	// ErrLanguage reports that Options.Lang is not one of the languages the
-	// source database lists in its metadata, so every localized name would be
-	// empty. The error message lists the available languages.
+	// ErrLanguage reports that Options.Lang, or a language of
+	// Options.Languages, is not one of the languages the source database
+	// lists in its metadata, so every name in it would be empty. The error
+	// message lists the available languages.
 	ErrLanguage = build.ErrLanguage
 
 	// ErrOptions reports an invalid Options value: an unknown Profile, a
-	// LatScale above MaxLatScale, a BuildTime before 1970, or a Description
-	// that is not valid UTF-8 or is longer than 65,535 bytes. It is returned
-	// before the source database is opened and before any output file is
-	// created.
+	// LatScale above MaxLatScale, a BuildTime before 1970, a Description
+	// that is not valid UTF-8 or is longer than 65,535 bytes, Fields the
+	// profile does not allow, an empty or repeated language in Languages,
+	// more than one language with ProfileASN, or both Lang and Languages
+	// set. It is returned before the source database is opened and before
+	// any output file is created.
 	ErrOptions = build.ErrOptions
 
 	// ErrStringTooLong reports a source string (a name, code or time zone) of

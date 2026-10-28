@@ -59,22 +59,58 @@ const (
 // users.
 type Options struct {
 	Profile ip2geo.Profile
-	// Languages are the languages of the names, the primary one first.
-	// Record names are indexed in this order. Empty means ["en"].
+	// Fields are the extension field sets. ip2geo.FieldsAll means every
+	// set the profile allows; any other set must be allowed by the profile
+	// (format.CheckFields).
+	Fields ip2geo.FieldSet
+	// Languages are the languages of the names, the primary one first:
+	// distinct and non-empty, one for ProfileASN. Record names are indexed
+	// in this order. Empty means ["en"].
 	Languages   []string
 	LatScale    uint8
 	BuildTime   time.Time
 	Description string
 }
 
+// allowedFields returns the field sets profile p allows.
+func allowedFields(p ip2geo.Profile) ip2geo.FieldSet {
+	var fs ip2geo.FieldSet
+	for f := ip2geo.FieldSet(1); f&ip2geo.FieldsAll != 0; f <<= 1 {
+		if format.CheckFields(uint8(p), uint32(f)) {
+			fs |= f
+		}
+	}
+	return fs
+}
+
 // Normalize validates o and fills in the defaults. It does no I/O, and
 // calling it again on its result changes nothing. Errors wrap ErrOptions.
 func (o *Options) Normalize() error {
 	switch o.Profile {
-	case ip2geo.ProfileCountry, ip2geo.ProfileRegion, ip2geo.ProfileCity:
+	case ip2geo.ProfileCountry, ip2geo.ProfileRegion, ip2geo.ProfileCity, ip2geo.ProfileASN:
 	default:
-		return fmt.Errorf("unknown Profile %d (want ProfileCountry, ProfileRegion or ProfileCity): %w",
+		return fmt.Errorf("unknown Profile %d (want ProfileCountry, ProfileRegion, ProfileCity or ProfileASN): %w",
 			o.Profile, ErrOptions)
+	}
+	if o.Fields == ip2geo.FieldsAll {
+		o.Fields = allowedFields(o.Profile)
+	} else if !format.CheckFields(uint8(o.Profile), uint32(o.Fields)) {
+		bad := o.Fields &^ allowedFields(o.Profile)
+		return fmt.Errorf("Fields %#x: field sets %#x are not allowed with profile %s: %w",
+			uint32(o.Fields), uint32(bad), o.Profile, ErrOptions)
+	}
+	seen := make(map[string]bool, len(o.Languages))
+	for _, l := range o.Languages {
+		switch {
+		case l == "":
+			return fmt.Errorf("Languages %q: empty language: %w", o.Languages, ErrOptions)
+		case seen[l]:
+			return fmt.Errorf("Languages %q: %q is listed twice: %w", o.Languages, l, ErrOptions)
+		}
+		seen[l] = true
+	}
+	if o.Profile == ip2geo.ProfileASN && len(o.Languages) > 1 {
+		return fmt.Errorf("Languages %q: profile asn has no names, so at most one language: %w", o.Languages, ErrOptions)
 	}
 	if o.LatScale > MaxLatScale {
 		return fmt.Errorf("LatScale %d is above %d (coordinates would overflow int32): %w",

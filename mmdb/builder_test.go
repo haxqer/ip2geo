@@ -431,6 +431,13 @@ func TestLanguage(t *testing.T) {
 		t.Errorf("Lang xx: error %q should name the language and list the available ones", err)
 	}
 
+	for _, langs := range [][]string{{"xx"}, {"en", "xx"}, {"de", "en", "xx"}} {
+		_, err = mmdb.Open(src, mmdb.Options{Profile: ip2geo.ProfileCity, Languages: langs})
+		if !errors.Is(err, mmdb.ErrLanguage) || !strings.Contains(err.Error(), `"xx"`) {
+			t.Errorf("Languages %q: err = %v, want ErrLanguage naming \"xx\"", langs, err)
+		}
+	}
+
 	// Without a languages list in the metadata there is nothing to check.
 	fx := cityFixture()
 	fx.languages = nil
@@ -469,6 +476,11 @@ func TestDatabaseType(t *testing.T) {
 		{"GeoIP2-ISP", ip2geo.ProfileCountry, `database type "GeoIP2-ISP"`},
 		{"GeoIP2-Anonymous-IP", ip2geo.ProfileCountry, `database type "GeoIP2-Anonymous-IP"`},
 		{"", ip2geo.ProfileCountry, `database type ""`},
+		{"GeoLite2-ASN", ip2geo.ProfileASN, ""},
+		{"DBIP-ASN-Lite (compat=GeoLite2-ASN)", ip2geo.ProfileASN, ""},
+		{"DBIP-ASN-Lite (compat=GeoLite2-ASN)", ip2geo.ProfileCity, "an ASN database; build it with profile asn"},
+		{"GeoIP2-City", ip2geo.ProfileASN, "profile asn needs an ASN database"},
+		{"GeoIP2-ISP", ip2geo.ProfileASN, "profile asn needs an ASN database"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.dbType+"/"+tt.profile.String(), func(t *testing.T) {
@@ -517,11 +529,22 @@ func TestOptionsValidation(t *testing.T) {
 		{"LatScale 8", mmdb.Options{Profile: ip2geo.ProfileCity, LatScale: 8}},
 		{"LatScale 255", mmdb.Options{Profile: ip2geo.ProfileCity, LatScale: 255}},
 		{"LatScale 8 country", mmdb.Options{LatScale: 8}},
-		{"Profile 3", mmdb.Options{Profile: ip2geo.Profile(3)}},
+		{"Profile 4", mmdb.Options{Profile: ip2geo.Profile(4)}},
 		{"Profile 255", mmdb.Options{Profile: ip2geo.Profile(255)}},
 		{"BuildTime before 1970", mmdb.Options{BuildTime: time.Date(1969, 12, 31, 23, 59, 59, 0, time.UTC)}},
 		{"Description not UTF-8", mmdb.Options{Description: "caf\xe9"}},
 		{"Description too long", mmdb.Options{Description: strings.Repeat("d", 1<<16)}},
+		{"Lang and Languages", mmdb.Options{Lang: "en", Languages: []string{"en"}}},
+		{"Languages empty language", mmdb.Options{Languages: []string{"en", ""}}},
+		{"Languages repeated", mmdb.Options{Languages: []string{"en", "de", "en"}}},
+		{"Fields subdivisions country", mmdb.Options{Fields: ip2geo.FieldSubdivisions}},
+		{"Fields postal region", mmdb.Options{Profile: ip2geo.ProfileRegion, Fields: ip2geo.FieldPostal}},
+		{"Fields metro region", mmdb.Options{Profile: ip2geo.ProfileRegion, Fields: ip2geo.FieldEU | ip2geo.FieldMetro}},
+		{"Fields location country", mmdb.Options{Fields: ip2geo.FieldLocation}},
+		{"Fields unknown bit", mmdb.Options{Profile: ip2geo.ProfileCity, Fields: 1 << 8}},
+		{"Fields unknown bit and all", mmdb.Options{Profile: ip2geo.ProfileCity, Fields: ip2geo.FieldsAll | 1<<8}},
+		{"Fields asn", mmdb.Options{Profile: ip2geo.ProfileASN, Fields: ip2geo.FieldEU}},
+		{"Languages asn", mmdb.Options{Profile: ip2geo.ProfileASN, Languages: []string{"en", "de"}}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -641,7 +664,7 @@ func TestBuildFailureKeepsOutput(t *testing.T) {
 		{"database type", writeMMDB(t, asn), mmdb.Options{Profile: ip2geo.ProfileCity}, mmdb.ErrDatabaseType},
 		{"language", good, mmdb.Options{Profile: ip2geo.ProfileCity, Lang: "xx"}, mmdb.ErrLanguage},
 		{"latscale", good, mmdb.Options{Profile: ip2geo.ProfileCity, LatScale: 8}, mmdb.ErrOptions},
-		{"profile", good, mmdb.Options{Profile: 3}, mmdb.ErrOptions},
+		{"profile", good, mmdb.Options{Profile: 4}, mmdb.ErrOptions},
 		{"string too long", writeMMDB(t, long), mmdb.Options{Profile: ip2geo.ProfileCity}, mmdb.ErrStringTooLong},
 		{"missing source", filepath.Join(dir, "missing.mmdb"), mmdb.Options{}, fs.ErrNotExist},
 	} {

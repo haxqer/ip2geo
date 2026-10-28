@@ -6,41 +6,58 @@ import (
 	"github.com/haxqer/ip2geo"
 )
 
-// Record is one source data record: the fields a database record can hold.
-// The builder keeps the ones the build's profile stores and ignores the
-// others. Names are indexed by language, in Options.Languages order; a
-// name slice shorter than the language list, and an empty string, mean
-// the source has no name in that language.
+// Record is one source data record: every field a geo or ASN database
+// record can hold. The builder keeps the ones the build's profile and field
+// sets store and ignores the others. Names are indexed by language, in
+// Options.Languages order; a name slice shorter than the language list, and
+// an empty string, mean the source has no name in that language.
 //
 // A frontend may reuse one Record (and its name slices) for every source
-// record: Record does not retain it.
+// record: Builder.Record does not retain it.
 type Record struct {
 	Continent Continent
 	Country   Country
 	// Subdivisions are the first two subdivisions of the source, the
-	// largest first. Region profiles keep the first one's ISO code and
-	// name.
+	// largest first. The region profile keeps the first one's ISO code and
+	// name, and ip2geo.FieldSubdivisions the rest of both.
 	Subdivisions [2]Subdivision
 	City         City
 	Location     Location
+	PostalCode   string
+
+	// RegisteredCountry and RepresentedCountry are kept with
+	// ip2geo.FieldRegistered; RepresentedType is the represented
+	// country's type, e.g. "military".
+	RegisteredCountry  Country
+	RepresentedCountry Country
+	RepresentedType    string
+
+	Traits Traits
+
+	// ASN is the record of a ProfileASN build.
+	ASN ip2geo.ASN
 }
 
 // Continent is a continent of a Record.
 type Continent struct {
-	Code string // two-letter continent code, e.g. "EU"
-}
-
-// Country is a country of a Record.
-type Country struct {
-	ISOCode   string
+	Code      string // two-letter continent code, e.g. "EU"
 	Names     []string
 	GeoNameID uint32
 }
 
+// Country is a country of a Record.
+type Country struct {
+	ISOCode           string
+	Names             []string
+	GeoNameID         uint32
+	IsInEuropeanUnion bool
+}
+
 // Subdivision is a subdivision (region) of a Record.
 type Subdivision struct {
-	ISOCode string
-	Names   []string
+	ISOCode   string
+	Names     []string
+	GeoNameID uint32
 }
 
 // City is the city of a Record.
@@ -49,11 +66,22 @@ type City struct {
 	GeoNameID uint32
 }
 
-// Location is the location of a Record. A missing coordinate is 0.
+// Location is the location of a Record. A missing coordinate is 0; the
+// Has fields say whether the source has the values.
 type Location struct {
 	Latitude, Longitude float64
 	AccuracyRadius      uint16
 	TimeZone            string
+	MetroCode           uint16
+	HasCoordinates      bool // latitude and longitude are both present
+	HasAccuracyRadius   bool
+}
+
+// Traits are the network traits of a Record.
+type Traits struct {
+	IsAnycast           bool
+	IsAnonymousProxy    bool
+	IsSatelliteProvider bool
 }
 
 // name returns names[j], or "" when names has no entry j.
@@ -64,7 +92,9 @@ func name(names []string, j int) string {
 	return ""
 }
 
-// recKey is a record: its string ids and its other fields.
+// recKey is a record: its string ids and its other fields. A ProfileASN
+// record keeps the AS number in countryGeo and the organization in
+// cityName, the base fields with the same width.
 type recKey struct {
 	countryISO, countryName, continent, regionISO, regionName, cityName, tz uint32
 	countryGeo, cityGeo                                                     uint32
@@ -74,10 +104,15 @@ type recKey struct {
 
 // key returns the record key of r for profile p, with provisional string
 // ids. It interns the strings in a fixed order, so string ids depend only on
-// the order in which records are first seen, and marks every string but the
-// city name as used by a 16-bit field.
+// the order in which records are first seen, and marks every string of a
+// 16-bit field as such.
 func (r *Record) key(p ip2geo.Profile, scale float64, strs *interner) recKey {
 	var k recKey
+	if p == ip2geo.ProfileASN {
+		k.countryGeo = r.ASN.Number
+		k.cityName = strs.id(r.ASN.Organization)
+		return k
+	}
 	k.countryISO = strs.id16(r.Country.ISOCode)
 	k.countryName = strs.id16(name(r.Country.Names, 0))
 	k.continent = strs.id16(r.Continent.Code)

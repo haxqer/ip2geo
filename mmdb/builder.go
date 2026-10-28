@@ -1,6 +1,7 @@
 // Package mmdb builds a fast ip2geo reader from a MaxMind DB (.mmdb) file:
-// a GeoIP2 or GeoLite2 City, Country or Enterprise database, or a DB-IP
-// database in the same layout (for example DBIP-City-Lite).
+// a GeoIP2 or GeoLite2 City, Country or Enterprise database, a GeoLite2 or
+// DB-IP ASN database, or a DB-IP database in the same layout (for example
+// DBIP-City-Lite).
 //
 // Use Open for the one-call, drop-in library workflow (build in memory, no
 // files):
@@ -14,6 +15,12 @@
 // GEO1 files written by v0.1.x.
 //
 // The zero Options value builds a ProfileCountry database with English names.
+// Options.Fields adds optional field sets (continent, EU membership,
+// registered and represented country, a second subdivision, postal and
+// metro codes, traits, and whether the location is present) and
+// Options.Languages adds names in more languages; both are read with
+// ip2geo.Reader.LookupDetails. ip2geo.ProfileASN builds an ASN database
+// from an ASN source.
 // Invalid options and unsuitable source databases are reported with the
 // sentinel errors ErrOptions, ErrDatabaseType and ErrLanguage; test for them
 // with errors.Is.
@@ -52,16 +59,43 @@ const (
 type Options struct {
 	// Profile selects how much geo detail the database keeps:
 	// ip2geo.ProfileCountry (the zero value), ip2geo.ProfileRegion or
-	// ip2geo.ProfileCity. Region and city need a City or Enterprise source
-	// database; with a Country database they fail with ErrDatabaseType.
-	// Any other value fails with ErrOptions.
+	// ip2geo.ProfileCity, or ip2geo.ProfileASN for an ASN database. Region
+	// and city need a City or Enterprise source database; with a Country
+	// database they fail with ErrDatabaseType. ProfileASN needs an ASN
+	// source database (one whose database type contains "ASN", for example
+	// GeoLite2-ASN or DBIP-ASN-Lite), and the geo profiles fail with
+	// ErrDatabaseType on one. Any other value fails with ErrOptions.
 	Profile ip2geo.Profile
+
+	// Fields selects the optional field sets stored beside the profile's
+	// Record fields, read with ip2geo.Reader.LookupDetails; the zero value
+	// stores none. ip2geo.FieldsAll stores every set the profile allows.
+	// Any other value must be allowed by the profile, otherwise the build
+	// fails with ErrOptions: FieldSubdivisions needs ProfileRegion or
+	// ProfileCity, FieldPostal, FieldMetro and FieldLocation need
+	// ProfileCity, and ProfileASN allows none. A field missing in the
+	// source is stored as its zero value.
+	Fields ip2geo.FieldSet
+
+	// Languages are the languages of the localized names, the primary one
+	// first, for example []string{"en", "de", "zh-CN"}. Empty means Lang.
+	// The primary language's names are the ones Lookup returns; a reader
+	// selects another language with ip2geo.Language or
+	// ip2geo.Reader.WithLanguage, and a name missing in it falls back to the
+	// primary language's. When the source metadata lists its languages,
+	// each one must be among them, otherwise the build fails with
+	// ErrLanguage. An empty or repeated language, more than one language
+	// with ProfileASN, and Languages set together with Lang fail with
+	// ErrOptions. A name missing in the primary language is stored empty.
+	Languages []string
 
 	// Lang is the language of the localized country, region and city names,
 	// for example "en", "de" or "zh-CN". Empty means "en". When the source
 	// metadata lists its languages, Lang must be one of them, otherwise the
 	// build fails with ErrLanguage. There is no fallback: a name that is
 	// missing in Lang is stored empty.
+	//
+	// Deprecated: Use Languages; Lang is Languages with one language.
 	Lang string
 
 	// LatScale is the number of latitude/longitude decimals kept by
@@ -106,14 +140,15 @@ type Stats struct {
 
 	// Records is the number of distinct records in the record table. It
 	// includes record 0, which is reserved for gaps (addresses without data),
-	// and one record per distinct combination of the fields the profile
-	// keeps, including the all-empty combination when some network has none
-	// of those fields.
+	// and one record per distinct combination of the fields the profile,
+	// the field sets and the languages keep, including the all-empty
+	// combination when some network has none of those fields.
 	Records int
 
 	// Strings is the number of distinct strings in the string table
-	// (names, ISO codes, continent codes, time zones, and the metadata's
-	// source type, language, description and builder), including the empty
+	// (names, ISO codes, continent codes, time zones, the strings of the
+	// field sets, AS organizations, the metadata's source type, language,
+	// description and builder, and the languages), including the empty
 	// string at id 0.
 	Strings int
 
@@ -134,12 +169,18 @@ func (s Stats) String() string { return build.Stats(s).String() }
 // coreOptions validates o and returns the options of the build core. It
 // does no I/O.
 func (o *Options) coreOptions() (build.Options, error) {
-	lang := o.Lang
-	if lang == "" {
-		lang = "en"
+	langs := o.Languages
+	switch {
+	case o.Lang != "" && len(langs) > 0:
+		return build.Options{}, fmt.Errorf("mmdb: both Lang %q and Languages %q are set (Lang is deprecated): %w",
+			o.Lang, langs, ErrOptions)
+	case len(langs) == 0 && o.Lang != "":
+		langs = []string{o.Lang}
+	case len(langs) == 0:
+		langs = []string{"en"}
 	}
 	co := build.Options{
-		Profile: o.Profile, Languages: []string{lang}, LatScale: o.LatScale,
+		Profile: o.Profile, Fields: o.Fields, Languages: slices.Clone(langs), LatScale: o.LatScale,
 		BuildTime: o.BuildTime, Description: o.Description,
 	}
 	if err := co.Normalize(); err != nil {
@@ -149,16 +190,25 @@ func (o *Options) coreOptions() (build.Options, error) {
 }
 
 // checkSource rejects source databases the builder cannot convert: anything
-// that is not a City, Country or Enterprise database, a Country database with
-// a profile that needs city data, and a language the database does not have.
+// that is not a City, Country, Enterprise or ASN database, a Country database
+// with a profile that needs city data, an ASN database with a geo profile or
+// the other way round, and a language the database does not have.
 func checkSource(md *maxminddb.Metadata, src string, opts *build.Options) error {
 	typ := md.DatabaseType
+	isASN := strings.Contains(typ, "ASN")
 	hasCity := strings.Contains(typ, "City") || strings.Contains(typ, "Enterprise")
-	if !hasCity && !strings.Contains(typ, "Country") {
-		return fmt.Errorf("mmdb: %q has database type %q, want a City, Country or Enterprise database: %w",
+	switch {
+	case opts.Profile == ip2geo.ProfileASN && !isASN:
+		return fmt.Errorf("mmdb: profile asn needs an ASN database, %q has database type %q: %w",
 			src, typ, ErrDatabaseType)
-	}
-	if !hasCity && opts.Profile != ip2geo.ProfileCountry {
+	case opts.Profile == ip2geo.ProfileASN:
+	case isASN:
+		return fmt.Errorf("mmdb: %q has database type %q, an ASN database; build it with profile asn: %w",
+			src, typ, ErrDatabaseType)
+	case !hasCity && !strings.Contains(typ, "Country"):
+		return fmt.Errorf("mmdb: %q has database type %q, want a City, Country, Enterprise or ASN database: %w",
+			src, typ, ErrDatabaseType)
+	case !hasCity && opts.Profile != ip2geo.ProfileCountry:
 		return fmt.Errorf("mmdb: profile %s needs a City database, %q has database type %q: %w",
 			opts.Profile, src, typ, ErrDatabaseType)
 	}
@@ -213,8 +263,7 @@ func readSource(srcMMDB string, co build.Options) (*build.Builder, error) {
 	// id. Records are still numbered, and strings interned, in the order the
 	// networks first reach them, so the output does not change.
 	byOffset := map[uintptr]uint32{}
-	dec := newSrcDecoder(co.Profile, co.Languages[0])
-	var src srcRecord
+	dec := newSrcDecoder(co.Profile, co.Fields, co.Languages)
 	var rec build.Record
 
 	for result := range db.Networks() {
@@ -225,10 +274,9 @@ func readSource(srcMMDB string, co build.Options) (*build.Builder, error) {
 		off := result.Offset()
 		recID, ok := byOffset[off]
 		if !ok {
-			if err := dec.decode(result, &src); err != nil {
+			if err := dec.decode(result, &rec); err != nil {
 				return nil, fmt.Errorf("mmdb: %q: decode network %s: %w", srcMMDB, result.Prefix(), err)
 			}
-			src.record(&rec)
 			recID = b.Record(&rec)
 			byOffset[off] = recID
 		}
