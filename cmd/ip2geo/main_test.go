@@ -75,13 +75,25 @@ func TestExitStatus(t *testing.T) {
 		{"build bad flag", []string{"build", "-nope"}, 2, "flag provided but not defined"},
 		{"build no src", []string{"build"}, 2, "-src is required"},
 		{"build argument", []string{"build", "-src", "x.mmdb", "extra"}, 2, `unexpected argument "extra"`},
-		{"build profile", []string{"build", "-src", "x.mmdb", "-profile", "street"}, 2, `unknown -profile "street"`},
+		{"build profile", []string{"build", "-src", "x.mmdb", "-profile", "street"}, 2, `unknown -profile "street" (want city, region, country or asn)`},
+		{"build fields", []string{"build", "-src", "x.mmdb", "-fields", "eu,zip"}, 2, `unknown -fields name "zip"`},
+		{"build fields empty name", []string{"build", "-src", "x.mmdb", "-fields", "eu,"}, 2, `unknown -fields name ""`},
+		// Fields and languages are checked by the builder, before the
+		// source is opened.
+		{"build fields for profile", []string{"build", "-src", missing, "-profile", "country", "-fields", "postal"}, 1, "invalid options"},
+		{"build fields for asn", []string{"build", "-src", missing, "-profile", "asn", "-fields", "eu"}, 1, "invalid options"},
+		{"build lang repeated", []string{"build", "-src", missing, "-lang", "en,de,en"}, 1, "invalid options"},
+		{"build lang empty", []string{"build", "-src", missing, "-lang", "en,"}, 1, "invalid options"},
+		{"build lang asn", []string{"build", "-src", missing, "-profile", "asn", "-lang", "en,de"}, 1, "invalid options"},
+		{"build asn missing source", []string{"build", "-src", missing, "-profile", "asn", "-fields", "all"}, 1, "no such file"},
 		{"build latscale", []string{"build", "-src", "x.mmdb", "-latscale", "300"}, 1, "invalid -latscale 300"},
 		// Options are checked before the source is opened.
 		{"build description", []string{"build", "-src", missing, "-description", "\xff"}, 1, "invalid options"},
 		{"build missing source", []string{"build", "-src", missing, "-out", filepath.Join(t.TempDir(), "o.geoc")}, 1, "ip2geo: build: "},
 		{"lookup no addresses", []string{"lookup", "-db", path}, 2, "no addresses given"},
 		{"lookup missing db", []string{"lookup", "-db", missing, "1.1.1.1"}, 1, "ip2geo: lookup: "},
+		// A GEO1 database has no languages.
+		{"lookup lang", []string{"lookup", "-db", path, "-lang", "de", "1.1.1.1"}, 1, "ip2geo: lookup: "},
 		{"info argument", []string{"info", "-db", path, "extra"}, 2, `unexpected argument "extra"`},
 		{"info missing db", []string{"info", "-db", missing}, 1, "ip2geo: info: "},
 		{"info not a database", []string{"info", "-db", filepath.Join("..", "..", "go.mod")}, 1, "not an ip2geo database"},
@@ -120,7 +132,7 @@ func TestInfoGEO1(t *testing.T) {
 	}
 	status, stdout, stderr := runCLI("info", "-db", path)
 	var want strings.Builder
-	writeInfo(&want, int64(len(b)), md)
+	writeInfo(&want, int64(len(b)), md, db.Languages())
 	if status != 0 || stdout != want.String() || stderr != "" {
 		t.Fatalf("status %d, stdout:\n%s\nstderr:\n%s\nwant status 0 and stdout:\n%s", status, stdout, stderr, want.String())
 	}
@@ -131,10 +143,11 @@ func TestInfoGEO1(t *testing.T) {
 
 func TestWriteInfo(t *testing.T) {
 	for _, tc := range []struct {
-		name string
-		size int64
-		md   ip2geo.Metadata
-		want string
+		name  string
+		size  int64
+		md    ip2geo.Metadata
+		langs []string
+		want  string
 	}{
 		{
 			name: "GEO2",
@@ -145,10 +158,12 @@ func TestWriteInfo(t *testing.T) {
 				SourceTime:  time.Date(2024, 5, 7, 15, 4, 5, 0, time.FixedZone("CEST", 2*3600)),
 				SourceType:  "GeoIP2-City",
 				Language:    "en",
+				Fields:      ip2geo.FieldEU | ip2geo.FieldPostal | ip2geo.FieldLocation,
 				Description: "test",
 				Builder:     "ip2geo/v0.2.0",
 				Networks:    10, DistinctRecords: 9, Records: 8, Strings: 7, IPv4Ranges: 6, IPv6Ranges: 5,
 			},
+			langs: []string{"en", "de", "zh-CN"},
 			want: `size: 1819048 bytes (1.73 MiB)
 format: GEO2
 profile: city
@@ -157,6 +172,8 @@ build_time: 2026-10-28T12:00:00Z
 source_type: GeoIP2-City
 source_time: 2024-05-07T13:04:05Z
 language: en
+languages: en,de,zh-CN
+fields: eu,postal,location
 description: test
 builder: ip2geo/v0.2.0
 networks: 10
@@ -168,9 +185,10 @@ ipv6_ranges: 5
 `,
 		},
 		{
-			name: "GEO2 unknown and unprintable",
-			size: 100,
-			md:   ip2geo.Metadata{FormatVersion: 2, Description: "two\nlines", Builder: "\x1b[31m", Language: "\xff"},
+			name:  "GEO2 unknown and unprintable",
+			size:  100,
+			md:    ip2geo.Metadata{FormatVersion: 2, Description: "two\nlines", Builder: "\x1b[31m", Language: "\xff"},
+			langs: []string{"\xff", "a\tb"},
 			want: `size: 100 bytes (0.00 MiB)
 format: GEO2
 profile: country
@@ -179,6 +197,8 @@ build_time: unknown
 source_type:
 source_time: unknown
 language: "\xff"
+languages: "\xff","a\tb"
+fields:
 description: "two\nlines"
 builder: "\x1b[31m"
 networks: 0
@@ -206,10 +226,97 @@ ipv6_ranges: 1
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var b strings.Builder
-			writeInfo(&b, tc.size, tc.md)
+			writeInfo(&b, tc.size, tc.md, tc.langs)
 			if b.String() != tc.want {
 				t.Errorf("got:\n%s\nwant:\n%s", b.String(), tc.want)
 			}
 		})
+	}
+}
+
+func TestParseFields(t *testing.T) {
+	for _, tc := range []struct {
+		in   string
+		want ip2geo.FieldSet
+		err  bool
+	}{
+		{"", 0, false},
+		{"all", ip2geo.FieldsAll, false},
+		{"eu", ip2geo.FieldEU, false},
+		{"location,eu,eu", ip2geo.FieldLocation | ip2geo.FieldEU, false},
+		{"eu,continent,registered,subdivisions,postal,metro,traits,location", ip2geo.FieldsAll, false},
+		{"EU", 0, true},
+		{"all,eu", 0, true},
+		{"eu, continent", 0, true},
+	} {
+		got, err := parseFields(tc.in)
+		if got != tc.want || (err != nil) != tc.err {
+			t.Errorf("parseFields(%q) = %#x, %v; want %#x, error %v", tc.in, uint32(got), err, uint32(tc.want), tc.err)
+		}
+	}
+	if s := fieldsText(ip2geo.FieldsAll); s != strings.Join(fieldSetNames(), ",") {
+		t.Errorf("fieldsText(FieldsAll) = %q", s)
+	}
+	for _, f := range fieldSets {
+		if got, err := parseFields(fieldsText(f.set)); err != nil || got != f.set {
+			t.Errorf("%s: round trip gives %#x, %v", f.name, uint32(got), err)
+		}
+	}
+}
+
+// TestBuildCommand runs build, info and lookup on real sources: a City
+// .mmdb named by IP2GEO_TEST_MMDB and an ASN .mmdb named by
+// IP2GEO_TEST_ASN_MMDB. Without them it skips. The checks of what info and
+// lookup print for field sets, languages and ASN need the revision 2.1
+// reader; with a reader that does not have them yet they are skipped.
+func TestBuildCommand(t *testing.T) {
+	city, asn := os.Getenv("IP2GEO_TEST_MMDB"), os.Getenv("IP2GEO_TEST_ASN_MMDB")
+	if city == "" && asn == "" {
+		t.Skip("set IP2GEO_TEST_MMDB to a City .mmdb and/or IP2GEO_TEST_ASN_MMDB to an ASN .mmdb to run")
+	}
+	dir := t.TempDir()
+	if city != "" {
+		out := filepath.Join(dir, "city.geoc")
+		status, stdout, stderr := runCLI("build", "-src", city, "-out", out, "-profile", "city", "-fields", "all", "-lang", "en,de")
+		if status != 0 || !strings.Contains(stdout, "built "+out) || !strings.Contains(stdout, "profile=city") {
+			t.Fatalf("build: status %d\n%s%s", status, stdout, stderr)
+		}
+		db, err := ip2geo.Open(out)
+		if err != nil {
+			t.Fatal(err)
+		}
+		hasExt := db.Fields() != 0
+		db.Close()
+		status, stdout, stderr = runCLI("info", "-db", out)
+		if status != 0 || !strings.Contains(stdout, "\nprofile: city\n") {
+			t.Fatalf("info: status %d\n%s%s", status, stdout, stderr)
+		}
+		if hasExt && !strings.Contains(stdout, "\nlanguages: en,de\nfields: "+fieldsText(ip2geo.FieldsAll)+"\n") {
+			t.Errorf("info:\n%s", stdout)
+		}
+		status, stdout, stderr = runCLI("lookup", "-db", out, "-lang", "de", "1.1.1.1", "8.8.8.8")
+		switch {
+		case !hasExt:
+			t.Log("the reader does not have field sets yet; lookup output not checked")
+		case status != 0 || strings.Count(stdout, "\n  traits: ") != 2 || strings.Count(stdout, "\n  continent: ") != 2:
+			t.Errorf("lookup: status %d\n%s%s", status, stdout, stderr)
+		}
+	}
+	if asn != "" {
+		out := filepath.Join(dir, "asn.geoc")
+		status, stdout, stderr := runCLI("build", "-src", asn, "-out", out, "-profile", "asn")
+		if status != 0 || !strings.Contains(stdout, "profile=asn") {
+			t.Fatalf("build: status %d\n%s%s", status, stdout, stderr)
+		}
+		db, err := ip2geo.Open(out)
+		if err != nil {
+			t.Logf("the reader does not read ASN databases yet (%v); lookup output not checked", err)
+			return
+		}
+		db.Close()
+		status, stdout, stderr = runCLI("lookup", "-db", out, "8.8.8.8")
+		if status != 0 || !strings.HasPrefix(stdout, "8.8.8.8: AS15169 ") {
+			t.Errorf("lookup: status %d\n%s%s", status, stdout, stderr)
+		}
 	}
 }
