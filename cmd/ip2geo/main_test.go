@@ -62,7 +62,7 @@ func runCLI(args ...string) (status int, stdout, stderr string) {
 
 func TestExitStatus(t *testing.T) {
 	path, _ := writeDB(t)
-	missing := filepath.Join(t.TempDir(), "missing")
+	missing := filepath.Join(t.TempDir(), "missing.mmdb")
 	for _, tc := range []struct {
 		name   string
 		args   []string

@@ -6,6 +6,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- Package `csvdb` builds from CSV sources: DB-IP's IP to City, Country and
+  ASN Lite CSV files and IP2Location's DB1, DB3, DB5, DB9, DB11 and ASN CSV
+  files (IPv4 or IPv6, gzipped or not), with `Open` and `Build` like package
+  `mmdb`. Malformed, unsorted or overlapping rows fail with `csvdb.ErrSyntax`
+  and the file and line. A DB-IP CSV build answers like the build of the
+  same month's .mmdb except where DB-IP's two files differ (see the package
+  documentation).
+- `ip2geo build -format mmdb|dbip-city|dbip-country|dbip-asn|ip2location|ip2location-asn`;
+  the default comes from the `-src` name (`*.mmdb`, `dbip-*-lite*.csv[.gz]`).
+
 ## [0.2.0] - 2026-10-28
 
 ### Changed

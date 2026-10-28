@@ -1,31 +1,43 @@
 // Command ip2geo builds a compact ip2geo database from a MaxMind DB (.mmdb)
-// City, Country, Enterprise or ASN database, looks up addresses in it and
-// prints its metadata.
+// City, Country, Enterprise or ASN database, or from a DB-IP or IP2Location
+// CSV file, looks up addresses in it and prints its metadata.
 //
 //	ip2geo build  -src GeoIP2-City.mmdb -out city.geoc -profile city
 //	ip2geo build  -src GeoIP2-City.mmdb -out city-de.geoc -fields all -lang en,de
 //	ip2geo build  -src GeoLite2-ASN.mmdb -out asn.geoc -profile asn
+//	ip2geo build  -src dbip-city-lite-2026-10.csv.gz -out city.geoc -profile city
+//	ip2geo build  -src IP2LOCATION-LITE-DB11.IPV6.CSV -format ip2location -out city.geoc
 //	ip2geo lookup -db city.geoc 81.2.69.142 2001:4860:4860::8888
 //	ip2geo info   -db city.geoc
 //
 // build flags:
 //
-//	-src          source .mmdb (required)
+//	-src          source .mmdb or CSV file (required); a CSV file whose
+//	              name ends in .gz is decompressed as it is read
+//	-format       the source's format: mmdb, dbip-city, dbip-country,
+//	              dbip-asn, ip2location (DB1, DB3, DB5, DB9 or DB11) or
+//	              ip2location-asn; by default mmdb for a -src ending in
+//	              .mmdb, and dbip-city, dbip-country or dbip-asn for one
+//	              named dbip-city-lite*.csv, dbip-country-lite*.csv or
+//	              dbip-asn-lite*.csv (.gz); required otherwise
 //	-out          output .geoc file, replaced atomically (default city.geoc)
 //	-profile      city | region | country | asn (default city); asn needs an
 //	              ASN source and the others a City, Country or Enterprise one
+//	              (or a CSV layout with that data)
 //	-fields       optional field sets, a comma-separated list of eu,
 //	              continent, registered, subdivisions, postal, metro, traits
 //	              and location, or all for every set the profile allows
 //	              (default none); see ip2geo.FieldSet
 //	-lang         languages of names, comma-separated, the primary one first;
-//	              each must be listed by the source (default en)
+//	              each must be listed by the source (default en); a CSV
+//	              source has English names only
 //	-latscale     lat/lon decimals kept by the city profile, 0..7; 0 means 4
 //	              (default 4)
 //	-description  free text recorded in the file's metadata (default empty)
 //
 // build writes the GEO2 format of docs/FORMAT.md; lookup and info also read
-// the GEO1 files written by v0.1.x.
+// the GEO1 files written by v0.1.x. Packages mmdb and csvdb document what is
+// kept from each kind of source.
 //
 // lookup prints one line per address: the country ISO code, region name,
 // city name, coordinates and time zone, or for an ASN database the AS number
@@ -46,10 +58,12 @@
 // status is 0 on success, 1 when a build, lookup or info fails (including a
 // -latscale outside 0..7, a -description that is not valid UTF-8 or is longer
 // than 65,535 bytes, -fields the profile does not allow, an unsuitable source
-// database, an unknown, empty or repeated -lang, and a file that is not a
-// valid database), and 2 for usage errors (unknown command or flag, missing
-// -src, unknown -profile or -fields name, unexpected arguments, lookup
-// without addresses).
+// database or a malformed CSV file, an unknown, empty or repeated -lang, a
+// -lang other than en with a CSV source, a gzipped .mmdb, and a file that is
+// not a valid database), and 2 for usage errors (unknown command or flag,
+// missing -src, unknown -format, no -format for a -src whose name does not
+// tell its format, unknown -profile or -fields name, unexpected arguments,
+// lookup without addresses).
 package main
 
 import (
@@ -59,6 +73,7 @@ import (
 	"io"
 	"net/netip"
 	"os"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -66,6 +81,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/haxqer/ip2geo"
+	"github.com/haxqer/ip2geo/csvdb"
 	"github.com/haxqer/ip2geo/mmdb"
 )
 
@@ -93,7 +109,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 
 func usage(stderr io.Writer) int {
 	fmt.Fprintln(stderr, "usage:")
-	fmt.Fprintln(stderr, "  ip2geo build  -src City.mmdb -out city.geoc [-profile city|region|country|asn] [-fields eu,continent,...|all]")
+	fmt.Fprintln(stderr, "  ip2geo build  -src City.mmdb|source.csv[.gz] -out city.geoc [-format "+strings.Join(formats, "|")+"]")
+	fmt.Fprintln(stderr, "                [-profile city|region|country|asn] [-fields eu,continent,...|all]")
 	fmt.Fprintln(stderr, "                [-lang en[,de,...]] [-latscale 0..7] [-description text]")
 	fmt.Fprintln(stderr, "  ip2geo lookup -db city.geoc [-lang de] <ip> [ip...]")
 	fmt.Fprintln(stderr, "  ip2geo info   -db city.geoc")
@@ -131,7 +148,9 @@ func parse(fs *flag.FlagSet, args []string) int {
 func build(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("build", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	src := fs.String("src", "", "source MaxMind DB City, Country, Enterprise or ASN .mmdb `file` (required)")
+	src := fs.String("src", "", "source `file`: a MaxMind DB City, Country, Enterprise or ASN .mmdb, or a DB-IP or IP2Location CSV, gzipped or not (required)")
+	format := fs.String("format", "", "source `format`: "+strings.Join(formats, ", ")+
+		" (default from the -src name: mmdb for *.mmdb, dbip-city for dbip-city-lite*.csv[.gz], and so on)")
 	out := fs.String("out", "city.geoc", "output .geoc `file`, replaced atomically")
 	profile := fs.String("profile", "city", "city | region | country | asn")
 	fields := fs.String("fields", "", "optional field `sets`: comma-separated "+strings.Join(fieldSetNames(), ", ")+", or all")
@@ -147,6 +166,10 @@ func build(args []string, stdout, stderr io.Writer) int {
 	}
 	if fs.NArg() > 0 {
 		return usageError(fs, "unexpected argument %q", fs.Arg(0))
+	}
+	f, err := sourceFormat(*src, *format)
+	if err != nil {
+		return usageError(fs, "%v", err)
 	}
 	var p ip2geo.Profile
 	switch *profile {
@@ -170,14 +193,54 @@ func build(args []string, stdout, stderr io.Writer) int {
 		return fail(stderr, "build", fmt.Errorf("invalid -latscale %d: must be 0..%d", *latscale, mmdb.MaxLatScale))
 	}
 	t := time.Now()
-	stats, err := mmdb.Build(*src, *out, mmdb.Options{
-		Profile: p, Fields: fset, Languages: strings.Split(*lang, ","), LatScale: uint8(*latscale), Description: *desc,
-	})
+	var stats fmt.Stringer
+	if f == "mmdb" {
+		if strings.HasSuffix(strings.ToLower(*src), ".gz") {
+			return fail(stderr, "build", fmt.Errorf("%s: a gzipped .mmdb cannot be read; decompress it first", *src))
+		}
+		stats, err = mmdb.Build(*src, *out, mmdb.Options{
+			Profile: p, Fields: fset, Languages: strings.Split(*lang, ","), LatScale: uint8(*latscale), Description: *desc,
+		})
+	} else {
+		if *lang != "en" {
+			return fail(stderr, "build", fmt.Errorf("-lang %q: a CSV source has English names only", *lang))
+		}
+		cf, _ := csvdb.ParseFormat(f) // sourceFormat accepted f
+		stats, err = csvdb.Build(*src, *out, csvdb.Options{
+			Format: cf, Profile: p, Fields: fset, LatScale: uint8(*latscale), Description: *desc,
+		})
+	}
 	if err != nil {
 		return fail(stderr, "build", err)
 	}
 	fmt.Fprintf(stdout, "built %s in %.1fs\n  %s\n", *out, time.Since(t).Seconds(), stats)
 	return 0
+}
+
+// formats are the -format names: mmdb and the csvdb formats.
+var formats = []string{"mmdb", "dbip-city", "dbip-country", "dbip-asn", "ip2location", "ip2location-asn"}
+
+// sourceFormat returns the format to build src with: flag, the -format
+// value, when it is set, and otherwise the one the name of src implies.
+func sourceFormat(src, flag string) (string, error) {
+	if flag != "" {
+		if !slices.Contains(formats, flag) {
+			return "", fmt.Errorf("unknown -format %q (want %s)", flag, strings.Join(formats, ", "))
+		}
+		return flag, nil
+	}
+	name := strings.TrimSuffix(strings.ToLower(filepath.Base(src)), ".gz")
+	switch {
+	case strings.HasSuffix(name, ".mmdb"):
+		return "mmdb", nil
+	case strings.HasSuffix(name, ".csv"):
+		for _, kind := range []string{"city", "country", "asn"} {
+			if strings.HasPrefix(name, "dbip-"+kind+"-lite") {
+				return "dbip-" + kind, nil
+			}
+		}
+	}
+	return "", fmt.Errorf("cannot tell the format of %q from its name; set -format", src)
 }
 
 func lookup(args []string, stdout, stderr io.Writer) int {
