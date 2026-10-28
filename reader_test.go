@@ -1,10 +1,14 @@
 package ip2geo
 
 import (
+	"bytes"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"math"
+	"math/rand/v2"
 	"net/netip"
+	"sort"
 	"testing"
 )
 
@@ -341,3 +345,310 @@ func BenchmarkLookup(b *testing.B) {
 		})
 	}
 }
+
+// key16 makes a 16-byte key from its big-endian halves.
+func key16(hi, lo uint64) (k [16]byte) {
+	binary.BigEndian.PutUint64(k[:8], hi)
+	binary.BigEndian.PutUint64(k[8:], lo)
+	return k
+}
+
+// v6DB returns a country-profile database whose IPv6 ranges start at
+// starts, range i pointing at record i+1, and with the IPv4 table of
+// cityTestDB.
+func v6DB(starts [][16]byte) *testDB {
+	d := cityTestDB().withProfile(ProfileCountry)
+	d.recCount = uint32(len(starts) + 1)
+	d.records = make([]byte, int(d.recCount)*int(d.recWidth))
+	d.v6starts = starts
+	d.v6rec = make([]uint32, len(starts))
+	for i := range d.v6rec {
+		d.v6rec[i] = uint32(i + 1)
+	}
+	return d
+}
+
+func openDB(t testing.TB, d *testDB) *Reader {
+	t.Helper()
+	b, _ := d.encode()
+	r, err := OpenBytes(b)
+	if err != nil {
+		t.Fatalf("OpenBytes: %v", err)
+	}
+	return r
+}
+
+// l2Bits returns the level-2 bits of the top-16 bucket holding prefix p.
+func l2Bits(r *Reader, p string) int {
+	a := netip.MustParsePrefix(p).Addr().As16()
+	return int(r.v6dir[binary.BigEndian.Uint16(a[:2])] & v6KMask)
+}
+
+// checkV6 checks search6 against the definition of a range, around every
+// start of d: start i and the address before start i+1 belong to range i.
+// Every probe in extra is checked against a plain binary search over d, and
+// a sample of starts through Lookup as well.
+func checkV6(t *testing.T, d *testDB, r *Reader, extra ...[16]byte) {
+	t.Helper()
+	search := func(k [16]byte) uint32 {
+		return r.search6(binary.BigEndian.Uint64(k[:8]), binary.BigEndian.Uint64(k[8:]))
+	}
+	ref := func(k [16]byte) uint32 {
+		j := sort.Search(len(d.v6starts), func(i int) bool { return bytes.Compare(d.v6starts[i][:], k[:]) > 0 })
+		if j == 0 {
+			return 0
+		}
+		return d.v6rec[j-1]
+	}
+	for i, s := range d.v6starts {
+		if got := search(s); got != d.v6rec[i] {
+			t.Fatalf("search6(%v), start %d: got record %d, want %d", netip.AddrFrom16(s), i, got, d.v6rec[i])
+		}
+		if s == ([16]byte{}) {
+			continue
+		}
+		var below uint32 // record of the range holding s-1
+		if i > 0 {
+			below = d.v6rec[i-1]
+		}
+		if got := search(add16(s, -1)); got != below {
+			t.Fatalf("search6(%v), before start %d: got record %d, want %d", netip.AddrFrom16(add16(s, -1)), i, got, below)
+		}
+		if i%61 == 0 {
+			extra = append(extra, s, add16(s, 1))
+		}
+	}
+	var ones [16]byte
+	for i := range ones {
+		ones[i] = 0xFF
+	}
+	for _, k := range append(extra, [16]byte{}, ones) {
+		want := ref(k)
+		if got := search(k); got != want {
+			t.Fatalf("search6(%v) = %d, want %d", netip.AddrFrom16(k), got, want)
+		}
+		a := netip.AddrFrom16(k)
+		if _, isV4 := embeddedV4(&k); isV4 || a.Is4In6() {
+			continue // Lookup answers from the IPv4 table
+		}
+		if rec, ok := r.Lookup(a); ok != (want != 0) || rec != r.decode(want) {
+			t.Fatalf("Lookup(%v) = %+v, %v; want record %d", a, rec, ok, want)
+		}
+	}
+}
+
+// slotEdgeStarts returns 8 starts in each of the 2^k level-2 slots of the
+// top-16 bucket top: on the slot's first address, six inside, and on its
+// last address, a one-address range. 8 * 2^k starts give the bucket k bits.
+func slotEdgeStarts(top uint64, k int) [][16]byte {
+	var out [][16]byte
+	shift := 48 - k
+	for s := uint64(0); s < 1<<k; s++ {
+		first := top<<48 | s<<shift
+		last := first | (1<<shift - 1)
+		out = append(out, key16(first, 0))
+		for j := uint64(1); j <= 6; j++ {
+			out = append(out, key16(first|j<<(shift-4), j))
+		}
+		out = append(out, key16(last, math.MaxUint64))
+	}
+	return out
+}
+
+func TestV6IndexSlotEdges(t *testing.T) {
+	for _, k := range []int{0, 1, 4, 9} {
+		t.Run(fmt.Sprintf("k=%d", k), func(t *testing.T) {
+			starts := slotEdgeStarts(0x2a02, k)
+			d := v6DB(starts)
+			r := openDB(t, d)
+			if got := l2Bits(r, "2a02::/16"); got != k {
+				t.Fatalf("2a02::/16 has %d level-2 bits, want %d", got, k)
+			}
+			// Each slot's edges, the bucket's edges and the addresses
+			// just outside them.
+			var extra [][16]byte
+			for _, s := range starts {
+				extra = append(extra, add16(s, 1), fillFrom(s, 16+k, 0), fillFrom(s, 16+k, 0xFF))
+			}
+			lo, hi := key16(0x2a02<<48, 0), key16(0x2a02<<48|(1<<48-1), math.MaxUint64)
+			extra = append(extra, lo, add16(lo, -1), hi, add16(hi, 1))
+			checkV6(t, d, r, extra...)
+			if got := r.search6(0x2a01<<48|(1<<48-1), math.MaxUint64); got != 0 {
+				t.Errorf("2a01:ffff:...: got record %d, want none", got)
+			}
+			if got, want := r.search6(0x2a03<<48, 0), uint32(len(starts)); got != want {
+				t.Errorf("2a03::: got record %d, want %d, the last range", got, want)
+			}
+		})
+	}
+}
+
+// deepV6Starts returns over 8 * 2^16 starts, all inside 2a02::/16, so that
+// the bucket gets the most level-2 bits, v6MaxL2Bits: one on the first and
+// one on the last address of each 2a02:s::/32 slot, and a dense cluster in
+// 2a02:abcd::/32 of pairs that share their top 64 bits.
+func deepV6Starts() [][16]byte {
+	const top = 0x2a02 << 48
+	var out [][16]byte
+	for s := uint64(0); s < 1<<16; s++ {
+		out = append(out, key16(top|s<<32, 0))
+		if s == 0xabcd {
+			for j := uint64(1); j <= 200_000; j++ {
+				out = append(out, key16(top|s<<32|j<<8, 0), key16(top|s<<32|j<<8, 1<<63))
+			}
+		}
+		out = append(out, key16(top|s<<32|0xFFFFFFFF, math.MaxUint64))
+	}
+	return out
+}
+
+func TestV6IndexDeepBucket(t *testing.T) {
+	starts := deepV6Starts()
+	d := v6DB(starts)
+	r := openDB(t, d)
+	if got := l2Bits(r, "2a02::/16"); got != v6MaxL2Bits {
+		t.Fatalf("2a02::/16 has %d level-2 bits for %d starts, want %d", got, len(starts), v6MaxL2Bits)
+	}
+	for _, p := range []string{"::/16", "2a01::/16", "2a03::/16", "ffff::/16"} {
+		if got := l2Bits(r, p); got != 0 {
+			t.Errorf("empty bucket %s has %d level-2 bits, want 0", p, got)
+		}
+	}
+	rng := rand.New(rand.NewPCG(1, 2))
+	var extra [][16]byte
+	for range 20_000 {
+		extra = append(extra, key16(0x2a02<<48|rng.Uint64()>>16, rng.Uint64()))
+		extra = append(extra, key16(0x2a02_abcd<<32|rng.Uint64()>>38, rng.Uint64())) // the cluster
+	}
+	checkV6(t, d, r, extra...)
+}
+
+func TestV6IndexBelowFirstStart(t *testing.T) {
+	// The first start is deep inside a bucket with a level-2 table, so the
+	// keys below it fall in an earlier slot of that bucket or in earlier,
+	// empty buckets: none of them is covered.
+	var starts [][16]byte
+	for j := uint64(0); j < 100; j++ {
+		starts = append(starts, key16(0x2a02_1234<<32|j<<16, 0))
+	}
+	d := v6DB(starts)
+	r := openDB(t, d)
+	if l2Bits(r, "2a02::/16") == 0 {
+		t.Fatal("2a02::/16 has no level-2 table")
+	}
+	for _, s := range []string{"::", "::1", "1::", "2a01:ffff:ffff:ffff:ffff:ffff:ffff:ffff", "2a02::",
+		"2a02:1000::", "2a02:1233:ffff:ffff:ffff:ffff:ffff:ffff"} {
+		k := a16(s)
+		if got := r.search6(binary.BigEndian.Uint64(k[:8]), binary.BigEndian.Uint64(k[8:])); got != 0 {
+			t.Errorf("search6(%s) = %d, want 0 (below the first start)", s, got)
+		}
+		if _, ok := r.Lookup(netip.MustParseAddr(s)); ok && s != "::" && s != "::1" {
+			t.Errorf("Lookup(%s) found data below the first start", s)
+		}
+	}
+	checkV6(t, d, r)
+}
+
+func TestV6IndexLastAddress(t *testing.T) {
+	ones := a16("ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff")
+	for _, withLast := range []bool{false, true} {
+		t.Run(fmt.Sprintf("start at the last address=%v", withLast), func(t *testing.T) {
+			starts := [][16]byte{{}}
+			starts = append(starts, slotEdgeStarts(0xffff, 3)[1:]...)
+			if withLast {
+				starts[len(starts)-1] = ones // replaces the slot's last-address start
+			} else {
+				starts = starts[:len(starts)-1]
+			}
+			d := v6DB(starts)
+			r := openDB(t, d)
+			if got := l2Bits(r, "ffff::/16"); got == 0 {
+				t.Fatal("ffff::/16 has no level-2 table")
+			}
+			want := uint32(len(starts))
+			if got := r.search6(math.MaxUint64, math.MaxUint64); got != want {
+				t.Errorf("search6(ffff:...:ffff) = %d, want %d, the last range", got, want)
+			}
+			checkV6(t, d, r, add16(ones, -1), fillFrom(ones, 19, 0))
+		})
+	}
+}
+
+func TestV6IndexEmptyBuckets(t *testing.T) {
+	// Populated buckets 2001::/16 and 2a02::/16 with level-2 tables, and
+	// 0db8::/16 with one start, around runs of empty buckets: a key in an
+	// empty bucket belongs to the last range of the populated bucket before it.
+	starts := [][16]byte{a16("db8::")}
+	starts = append(starts, slotEdgeStarts(0x2001, 2)...)
+	starts = append(starts, slotEdgeStarts(0x2a02, 3)...)
+	d := v6DB(starts)
+	r := openDB(t, d)
+	last2001 := uint32(1 + 8<<2)
+	cases := []struct {
+		ip   string
+		want uint32
+	}{
+		{"::", 0},
+		{"db7:ffff:ffff:ffff:ffff:ffff:ffff:ffff", 0},
+		{"db8::", 1},
+		{"db9::", 1},
+		{"2000:ffff:ffff:ffff:ffff:ffff:ffff:ffff", 1},
+		{"2001:ffff:ffff:ffff:ffff:ffff:ffff:ffff", last2001},
+		{"2002::", last2001},
+		{"2400::1", last2001},
+		{"2a01:ffff:ffff:ffff:ffff:ffff:ffff:ffff", last2001},
+		{"2a02::", last2001 + 1},
+		{"2a03::", uint32(len(starts))},
+		{"ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff", uint32(len(starts))},
+	}
+	for _, c := range cases {
+		k := a16(c.ip)
+		if got := r.search6(binary.BigEndian.Uint64(k[:8]), binary.BigEndian.Uint64(k[8:])); got != c.want {
+			t.Errorf("search6(%s) = %d, want %d", c.ip, got, c.want)
+		}
+	}
+	for _, p := range []string{"::/16", "db8::/16", "2002::/16", "2400::/16", "2a01::/16", "ffff::/16"} {
+		if got := l2Bits(r, p); got != 0 {
+			t.Errorf("%s has %d level-2 bits, want 0", p, got)
+		}
+	}
+	if l2Bits(r, "2001::/16") != 2 || l2Bits(r, "2a02::/16") != 3 {
+		t.Errorf("level-2 bits: 2001::/16 %d, 2a02::/16 %d; want 2 and 3", l2Bits(r, "2001::/16"), l2Bits(r, "2a02::/16"))
+	}
+	checkV6(t, d, r)
+}
+
+func TestV6L2Bits(t *testing.T) {
+	cases := []struct{ count, want int }{
+		{0, 0}, {1, 0}, {8, 0}, {9, 1}, {16, 1}, {17, 2}, {64, 3}, {65, 4},
+		{8 << 15, 15}, {8<<15 + 1, 16}, {8 << 16, 16}, {8<<16 + 1, 16}, {1 << 30, 16},
+	}
+	for _, c := range cases {
+		if got := v6L2Bits(c.count); got != c.want {
+			t.Errorf("v6L2Bits(%d) = %d, want %d", c.count, got, c.want)
+		}
+	}
+}
+
+// BenchmarkLookupV6Index looks up addresses spread over the ranges of the
+// deep-bucket database, one per range in turn; most of them fall in the
+// dense 2a02:abcd::/32 slot.
+func BenchmarkLookupV6Index(b *testing.B) {
+	starts := deepV6Starts()
+	r := openDB(b, v6DB(starts))
+	addrs := make([]netip.Addr, 1<<16)
+	rng := rand.New(rand.NewPCG(1, 2))
+	for i := range addrs {
+		addrs[i] = netip.AddrFrom16(add16(starts[rng.IntN(len(starts))], 1))
+	}
+	b.ReportAllocs()
+	n := 0
+	for i := 0; b.Loop(); i++ {
+		if _, ok := r.Lookup(addrs[i&(len(addrs)-1)]); ok {
+			n++
+		}
+	}
+	sinkN = n
+}
+
+var sinkN int

@@ -1,6 +1,7 @@
 package ip2geo
 
 import (
+	"bytes"
 	"encoding/binary"
 	"net/netip"
 	"sort"
@@ -54,6 +55,30 @@ func fuzzSeeds() [][]byte {
 		d.v6starts = append(d.v6starts, s)
 		d.v6rec = append(d.v6rec, (i+1)%3)
 	}
+	add(d)
+
+	// Many starts in one top-16 bucket, so that it gets a level-2 table:
+	// starts on multiples of 2^40 (some of them slot edges), starts just
+	// below others, and pairs that share their top 64 bits. Then a last
+	// range in the last bucket.
+	d = cityTestDB()
+	d.v6starts, d.v6rec = [][16]byte{{}}, []uint32{0}
+	for i := uint64(0); i < 100; i++ {
+		hi, lo := 0x2a02<<48|i<<40, uint64(0)
+		switch i % 4 {
+		case 1:
+			hi--
+		case 3:
+			hi, lo = 0x2a02<<48|(i-1)<<40, 1<<62
+		}
+		var s [16]byte
+		binary.BigEndian.PutUint64(s[:8], hi)
+		binary.BigEndian.PutUint64(s[8:], lo)
+		d.v6starts = append(d.v6starts, s)
+		d.v6rec = append(d.v6rec, uint32(1+i%2))
+	}
+	d.v6starts = append(d.v6starts, a16("ffff::"))
+	d.v6rec = append(d.v6rec, recLA)
 	add(d)
 
 	// Smallest valid database: one empty string, record 0, no ranges.
@@ -137,11 +162,15 @@ func checkIndex(t *testing.T, r *Reader) {
 
 	n6 := len(r.v6rec)
 	start6 := func(i int) (k [16]byte) {
-		copy(k[:], r.v6starts[i*16:])
+		binary.BigEndian.PutUint64(k[:8], r.v6hi[i])
+		binary.BigEndian.PutUint64(k[8:], r.v6lo[i])
 		return k
 	}
 	ref6 := func(k [16]byte) uint32 {
-		i := sort.Search(n6, func(i int) bool { return cmp16(r.v6starts[i*16:], k[:]) > 0 })
+		i := sort.Search(n6, func(i int) bool {
+			s := start6(i)
+			return bytes.Compare(s[:], k[:]) > 0
+		})
 		if i == 0 {
 			return 0
 		}
@@ -154,18 +183,30 @@ func checkIndex(t *testing.T, r *Reader) {
 	keys6 := [][16]byte{zero, ones}
 	for i := 0; i < n6 && i < maxStarts; i++ {
 		s := start6(i)
-		lo, hi := s, s
-		clear(lo[2:])
-		for j := 2; j < 16; j++ {
-			hi[j] = 0xFF
+		keys6 = append(keys6, add16(s, -1), s, add16(s, 1))
+		// The edges of the start's top-16 bucket and of its level-2 slot.
+		k := int(r.v6dir[r.v6hi[i]>>(64-v6IdxBits)] & v6KMask)
+		for _, bit := range []int{v6IdxBits, v6IdxBits + k} {
+			lo, hi := fillFrom(s, bit, 0), fillFrom(s, bit, 0xFF)
+			keys6 = append(keys6, lo, add16(lo, -1), hi, add16(hi, 1))
 		}
-		keys6 = append(keys6, add16(s, -1), s, add16(s, 1), lo, add16(lo, -1), hi)
 	}
 	for _, k := range keys6 {
-		if got, want := r.search6(k), ref6(k); got != want {
+		got := r.search6(binary.BigEndian.Uint64(k[:8]), binary.BigEndian.Uint64(k[8:]))
+		if want := ref6(k); got != want {
 			t.Fatalf("search6(%v) = %d, want %d", netip.AddrFrom16(k), got, want)
 		}
 	}
+}
+
+// fillFrom sets every bit of k from bit on (0 is the most significant) to
+// the matching bit of fill, 0x00 or 0xFF.
+func fillFrom(k [16]byte, bit int, fill byte) [16]byte {
+	for i := bit; i < 128; i++ {
+		m := byte(0x80) >> (i % 8)
+		k[i/8] = k[i/8]&^m | fill&m
+	}
+	return k
 }
 
 // FuzzOpenBytes: OpenBytes never panics, fails only with a sentinel error,

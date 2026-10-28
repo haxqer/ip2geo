@@ -18,6 +18,17 @@ const (
 	v6IdxBits = 16
 )
 
+// The IPv6 index has a second level inside each populated top-16 bucket,
+// over the next k bits. k grows with the bucket so that its starts spread to
+// about v6SlotStarts per level-2 slot, and is at most v6MaxL2Bits. An entry
+// of Reader.v6dir packs the bucket's offset into v6l2 above v6KBits bits of k.
+const (
+	v6SlotStarts = 8
+	v6MaxL2Bits  = 16
+	v6KBits      = 5
+	v6KMask      = 1<<v6KBits - 1
+)
+
 // Reader is a read-only handle to a compact database. It is safe for
 // concurrent use by multiple goroutines, Close included. Lookups perform no
 // allocation.
@@ -35,10 +46,17 @@ type Reader struct {
 	v4rec    []uint32
 	lo4      []int32
 
-	// IPv6 index (DXR), starts stored as raw 16-byte keys
-	v6starts []byte
-	v6rec    []uint32
-	lo6      []int32
+	// IPv6 index: starts split into big-endian halves, compared as two
+	// integers, and a two-level DXR table. v6dir[g] describes top-16 bucket
+	// g: its level-2 table is v6l2[o:o+1<<k], o = v6dir[g]>>v6KBits and
+	// k = v6dir[g]&v6KMask, and v6l2[o+s] is the index of the first start in
+	// slot s (the k bits after the top 16). The tables are laid end to end
+	// and end with len(v6hi), so a slot's starts are v6l2[o+s]:v6l2[o+s+1].
+	v6hi  []uint64
+	v6lo  []uint64
+	v6rec []uint32
+	v6dir *[1 << v6IdxBits]uint32
+	v6l2  []int32
 }
 
 // Open loads a compact database file into memory. It refuses files larger
@@ -194,12 +212,16 @@ func OpenBytes(b []byte) (*Reader, error) {
 	if err != nil {
 		return nil, err
 	}
-	for i := 16; i < len(starts6); i += 16 {
-		if bytes.Compare(starts6[i-16:i], starts6[i:i+16]) >= 0 {
-			return nil, fmt.Errorf("ip2geo: IPv6 start %d is not above start %d: %w", i/16, i/16-1, ErrCorrupt)
+	r.v6hi = make([]uint64, n6)
+	r.v6lo = make([]uint64, n6)
+	for i := range r.v6hi {
+		hi := binary.BigEndian.Uint64(starts6[i*16:])
+		lo := binary.BigEndian.Uint64(starts6[i*16+8:])
+		if i > 0 && !less128(r.v6hi[i-1], r.v6lo[i-1], hi, lo) {
+			return nil, fmt.Errorf("ip2geo: IPv6 start %d is not above start %d: %w", i, i-1, ErrCorrupt)
 		}
+		r.v6hi[i], r.v6lo[i] = hi, lo
 	}
-	r.v6starts = bytes.Clone(starts6)
 	if r.v6rec, err = recordIDs(ids6, rc, "IPv6"); err != nil {
 		return nil, err
 	}
@@ -306,17 +328,67 @@ func (r *Reader) buildIndex() {
 		r.lo4[g] = int32(bi)
 	}
 
-	// v6: top v6IdxBits bits (first 2 bytes)
-	size6 := (1 << v6IdxBits) + 1
-	r.lo6 = make([]int32, size6)
-	bi = 0
-	n6 := len(r.v6rec)
-	for g := 0; g < size6; g++ {
-		for bi < n6 && int(r.v6starts[bi*16])<<8|int(r.v6starts[bi*16+1]) < g {
-			bi++
+	r.buildIndex6()
+}
+
+// buildIndex6 constructs the two-level IPv6 table described at Reader.v6dir.
+func (r *Reader) buildIndex6() {
+	hi := r.v6hi
+	n := len(hi)
+	dir := new([1 << v6IdxBits]uint32)
+
+	// Size each bucket's level-2 table from the number of starts in it. A
+	// bucket of c > v6SlotStarts starts gets fewer than c/4 slots, so there
+	// are fewer than 2^16 + n/4 in all: under 2^27 for any input below
+	// maxFileSize (n < 2^31/20), which leaves v6KBits bits for k in a uint32.
+	slots, i := 0, 0
+	for g := range dir {
+		j := i
+		for j < n && hi[j]>>(64-v6IdxBits) == uint64(g) {
+			j++
 		}
-		r.lo6[g] = int32(bi)
+		k := v6L2Bits(j - i)
+		dir[g] = uint32(slots)<<v6KBits | uint32(k)
+		slots += 1 << k
+		i = j
 	}
+	l2 := make([]int32, slots+1)
+	i = 0
+	for g, d := range dir {
+		o, k := int(d>>v6KBits), d&v6KMask
+		for s := range 1 << k {
+			for i < n && hi[i]>>(64-v6IdxBits) == uint64(g) && v6Slot(hi[i], k) < uint64(s) {
+				i++
+			}
+			l2[o+s] = int32(i)
+		}
+		for i < n && hi[i]>>(64-v6IdxBits) == uint64(g) {
+			i++
+		}
+	}
+	l2[slots] = int32(n)
+	r.v6dir, r.v6l2 = dir, l2
+}
+
+// v6L2Bits returns the level-2 bits for a top-16 bucket holding count range
+// starts: ceil(log2(count/v6SlotStarts)), clamped to [0, v6MaxL2Bits].
+func v6L2Bits(count int) int {
+	k := 0
+	for k < v6MaxL2Bits && count > v6SlotStarts<<k {
+		k++
+	}
+	return k
+}
+
+// v6Slot returns the k bits that follow the top 16 bits of hi, the level-2
+// slot of hi in its bucket. k is at most v6MaxL2Bits; for k == 0 it is 0.
+func v6Slot(hi uint64, k uint32) uint64 {
+	return hi << v6IdxBits >> 1 >> ((63 - k) & 63)
+}
+
+// less128 reports whether the 128-bit value ahi:alo is below bhi:blo.
+func less128(ahi, alo, bhi, blo uint64) bool {
+	return ahi < bhi || ahi == bhi && alo < blo
 }
 
 // Profile reports the precision profile the database was built with.
@@ -346,7 +418,7 @@ func (r *Reader) Lookup(ip netip.Addr) (rec Record, ok bool) {
 		if v4, isV4 := embeddedV4(&a); isV4 {
 			id = r.search4(v4)
 		} else {
-			id = r.search6(a)
+			id = r.search6(binary.BigEndian.Uint64(a[:8]), binary.BigEndian.Uint64(a[8:]))
 		}
 	}
 	if id == 0 {
@@ -401,17 +473,18 @@ func (r *Reader) search4(key uint32) uint32 {
 	return r.v4rec[l-1]
 }
 
-func (r *Reader) search6(key [16]byte) uint32 {
-	g := int(key[0])<<8 | int(key[1])
-	lo := int(r.lo6[g])
-	if lo > 0 {
-		lo--
-	}
-	hi := int(r.lo6[g+1])
-	l, h := lo, hi
+// search6 returns the record id of the range holding the IPv6 key hi:lo, or
+// 0 when the key is below the first start. Every start before the key's
+// level-2 slot is below the key and every start after it is above, so the
+// binary search covers the slot alone: it finds the first start above the
+// key, and the range before that one holds the key.
+func (r *Reader) search6(hi, lo uint64) uint32 {
+	d := r.v6dir[hi>>(64-v6IdxBits)]
+	s := d>>v6KBits + uint32(v6Slot(hi, d&v6KMask))
+	l, h := int(r.v6l2[s]), int(r.v6l2[s+1])
 	for l < h {
-		mid := (l + h) >> 1
-		if cmp16(r.v6starts[mid*16:], key[:]) > 0 {
+		mid := int(uint(l+h) >> 1)
+		if less128(hi, lo, r.v6hi[mid], r.v6lo[mid]) {
 			h = mid
 		} else {
 			l = mid + 1
@@ -421,18 +494,6 @@ func (r *Reader) search6(key [16]byte) uint32 {
 		return 0
 	}
 	return r.v6rec[l-1]
-}
-
-func cmp16(a []byte, b []byte) int {
-	for i := 0; i < 16; i++ {
-		if a[i] != b[i] {
-			if a[i] < b[i] {
-				return -1
-			}
-			return 1
-		}
-	}
-	return 0
 }
 
 func (r *Reader) str(id uint32) string {
