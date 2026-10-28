@@ -6,7 +6,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-<!-- on release: rename to [0.1.0] - YYYY-MM-DD and add the compare link -->
+## [0.1.0] - 2026-10-28
 
 ### Added
 - Fast, zero-dependency reader for a compact IP-geolocation database. A
@@ -77,8 +77,5 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   failed build never leaves a partial output file.
 - The CLI validates `-latscale` instead of truncating it to 8 bits.
 
-<!-- after tagging v0.1.0 the links become:
 [Unreleased]: https://github.com/haxqer/ip2geo/compare/v0.1.0...HEAD
 [0.1.0]: https://github.com/haxqer/ip2geo/releases/tag/v0.1.0
--->
-[Unreleased]: https://github.com/haxqer/ip2geo/commits/main
