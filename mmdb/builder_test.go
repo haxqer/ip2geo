@@ -192,12 +192,13 @@ func TestFixtureReadableByMaxminddb(t *testing.T) {
 func TestBuildRoundTrip(t *testing.T) {
 	t.Parallel()
 	src := writeMMDB(t, cityFixture())
+	// Every network of the fixture has its own data record: DistinctRecords 6.
 	wantStats := map[ip2geo.Profile]mmdb.Stats{
 		// records: gap + {GB, empty, DE, JP}; v4: GB, empty, gap, DE, gap.
-		ip2geo.ProfileCountry: {Profile: ip2geo.ProfileCountry, Networks: 6, Records: 5, V4Ranges: 5, V6Ranges: 4},
-		ip2geo.ProfileRegion:  {Profile: ip2geo.ProfileRegion, Networks: 6, Records: 5, V4Ranges: 5, V6Ranges: 4},
+		ip2geo.ProfileCountry: {Profile: ip2geo.ProfileCountry, Networks: 6, DistinctRecords: 6, Records: 5, V4Ranges: 5, V6Ranges: 4},
+		ip2geo.ProfileRegion:  {Profile: ip2geo.ProfileRegion, Networks: 6, DistinctRecords: 6, Records: 5, V4Ranges: 5, V6Ranges: 4},
 		// records: gap + {Wimbledon, London, empty, Munich, Tokyo}.
-		ip2geo.ProfileCity: {Profile: ip2geo.ProfileCity, Networks: 6, Records: 6, V4Ranges: 6, V6Ranges: 4},
+		ip2geo.ProfileCity: {Profile: ip2geo.ProfileCity, Networks: 6, DistinctRecords: 6, Records: 6, V4Ranges: 6, V6Ranges: 4},
 	}
 	for _, p := range profiles {
 		t.Run(p.String(), func(t *testing.T) {
@@ -234,6 +235,150 @@ func TestBuildRoundTrip(t *testing.T) {
 			defer mem.Close()
 			checkLookups(t, mem, p, cityLookups)
 		})
+	}
+}
+
+// TestDistinctRecordsCountsOffsets: networks that share a data record are
+// decoded once, so Stats.DistinctRecords counts data offsets, not networks
+// and not builder records.
+func TestDistinctRecordsCountsOffsets(t *testing.T) {
+	t.Parallel()
+	london := func(postal string) map[string]any {
+		d := cityData("EU", "GB", 2635167, "United Kingdom", "Vereinigtes Königreich", "ENG", "England",
+			2643743, "London", 51.5085, -0.1257, 50, "Europe/London")
+		d["postal"] = map[string]any{"code": postal}
+		return d
+	}
+	src := writeMMDB(t, mmdbFixture{
+		dbType:    "GeoIP2-City",
+		languages: []string{"de", "en"},
+		aliasV4:   true,
+		networks: []mmdbNet{
+			// Equal data is stored once: three networks, one data record.
+			{"1.0.0.0/24", london("SW1")},
+			{"1.0.1.0/24", london("SW1")},
+			{"2001:db8::/32", london("SW1")},
+			// A second data record that differs only in a field no
+			// profile keeps: it becomes the same builder record.
+			{"1.0.4.0/24", london("EC1")},
+			{"1.0.5.0/24", registeredOnly("US", 6252001)},
+		},
+	})
+
+	// The fixture really shares offsets: 5 networks, 3 data records.
+	mdb, err := maxminddb.Open(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	offsets := map[uintptr]bool{}
+	networks := 0
+	for res := range mdb.Networks() {
+		networks++
+		offsets[res.Offset()] = true
+	}
+	mdb.Close()
+	if networks != 5 || len(offsets) != 3 {
+		t.Fatalf("fixture: %d networks, %d distinct offsets; want 5 and 3", networks, len(offsets))
+	}
+
+	for _, p := range profiles {
+		st, err := mmdb.Build(src, filepath.Join(t.TempDir(), "out.geoc"), mmdb.Options{Profile: p})
+		if err != nil {
+			t.Fatal(err)
+		}
+		// records: gap + London + found-but-empty.
+		if st.Networks != 5 || st.DistinctRecords != 3 || st.Records != 3 {
+			t.Errorf("%v: networks=%d distinct=%d records=%d, want 5, 3, 3", p, st.Networks, st.DistinctRecords, st.Records)
+		}
+		if !strings.Contains(st.String(), " distinct=3 ") {
+			t.Errorf("%v: Stats.String() = %q, want distinct=3", p, st)
+		}
+		db, err := mmdb.Open(src, mmdb.Options{Profile: p})
+		if err != nil {
+			t.Fatal(err)
+		}
+		checkLookups(t, db, p, []lookupCase{
+			{"1.0.0.1", true, recLondon}, {"1.0.1.255", true, recLondon}, {"2001:db8::1", true, recLondon},
+			{"1.0.4.1", true, recLondon}, {"1.0.5.1", true, ip2geo.Record{}}, {"1.0.2.1", false, ip2geo.Record{}},
+		})
+		db.Close()
+	}
+}
+
+// TestNamesInOneLanguage: names are decoded in Options.Lang only, and only
+// for the first subdivision. The stored values must equal what a full decode
+// of the source gives, for each language, including names missing in it.
+func TestNamesInOneLanguage(t *testing.T) {
+	t.Parallel()
+	langs := []string{"de", "en", "fr", "ja", "zh-CN"}
+	multi := func(name string) map[string]any {
+		return map[string]any{"de": name + " (de)", "en": name, "ja": name + " (ja)", "zh-CN": name + " (zh)"}
+	}
+	paris := map[string]any{
+		"continent": map[string]any{"code": "EU", "names": multi("Europe")},
+		"country":   map[string]any{"iso_code": "FR", "geoname_id": uint32(3017382), "names": multi("France")},
+		// Only en and fr: de, ja and zh-CN are missing.
+		"city": map[string]any{"geoname_id": uint32(2988507), "names": map[string]any{"en": "Paris", "fr": "Paris (fr)"}},
+		"subdivisions": []any{
+			map[string]any{"iso_code": "IDF", "geoname_id": uint32(3012874), "names": multi("Ile-de-France")},
+			map[string]any{"iso_code": "75", "geoname_id": uint32(2968815), "names": multi("Paris department")},
+		},
+		"location": map[string]any{"latitude": 48.8534, "longitude": 2.3488, "accuracy_radius": uint16(5), "time_zone": "Europe/Paris"},
+	}
+	noRegion := map[string]any{
+		"country":      map[string]any{"iso_code": "MC", "geoname_id": uint32(2993457), "names": map[string]any{"fr": "Monaco (fr)"}},
+		"subdivisions": []any{},
+	}
+	src := writeMMDB(t, mmdbFixture{
+		dbType:    "GeoIP2-City",
+		languages: langs,
+		networks: []mmdbNet{
+			{"1.0.0.0/24", paris},
+			{"1.0.1.0/24", noRegion},
+			{"2001:db8::/32", paris},
+		},
+	})
+	mdb, err := maxminddb.Open(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mdb.Close()
+
+	for _, lang := range langs {
+		db, err := mmdb.Open(src, mmdb.Options{Profile: ip2geo.ProfileCity, Lang: lang})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, ip := range []string{"1.0.0.1", "1.0.1.1", "2001:db8::1"} {
+			addr := netip.MustParseAddr(ip)
+			var full struct {
+				Country struct {
+					Names map[string]string `maxminddb:"names"`
+				} `maxminddb:"country"`
+				City struct {
+					Names map[string]string `maxminddb:"names"`
+				} `maxminddb:"city"`
+				Subdivisions []struct {
+					ISOCode string            `maxminddb:"iso_code"`
+					Names   map[string]string `maxminddb:"names"`
+				} `maxminddb:"subdivisions"`
+			}
+			if err := mdb.Lookup(addr).Decode(&full); err != nil {
+				t.Fatal(err)
+			}
+			var regionISO, regionName string
+			if len(full.Subdivisions) > 0 {
+				regionISO, regionName = full.Subdivisions[0].ISOCode, full.Subdivisions[0].Names[lang]
+			}
+			rec, ok := db.Lookup(addr)
+			if !ok || rec.CountryName != full.Country.Names[lang] || rec.City != full.City.Names[lang] ||
+				rec.RegionISO != regionISO || rec.RegionName != regionName {
+				t.Errorf("Lang %s, %s: got %q/%q/%q/%q ok=%v, want %q/%q/%q/%q", lang, ip,
+					rec.CountryName, rec.City, rec.RegionISO, rec.RegionName, ok,
+					full.Country.Names[lang], full.City.Names[lang], regionISO, regionName)
+			}
+		}
+		db.Close()
 	}
 }
 

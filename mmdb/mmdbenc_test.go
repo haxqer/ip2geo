@@ -29,7 +29,8 @@ type mmdbFixture struct {
 
 // mmdbNet is one network and its data record. Supported value types are
 // string, float64 (double), uint16, uint32, uint64, bool, []any, []string and
-// map[string]any.
+// map[string]any. Networks whose data encodes to the same bytes share one
+// data record (one data-section offset), as MaxMind's writer stores them.
 type mmdbNet struct {
 	prefix string // IPv4 or IPv6 CIDR; IPv4 is stored at ::a.b.c.d/(96+bits)
 	data   map[string]any
@@ -85,6 +86,7 @@ func (n *trieNode) insert(key [16]byte, bits, ref int) error {
 func encodeMMDB(fx mmdbFixture) ([]byte, error) {
 	root := &trieNode{}
 	var data enc
+	refs := map[string]int{} // encoded record -> its ref
 	for _, nw := range fx.networks {
 		pfx, err := netip.ParsePrefix(nw.prefix)
 		if err != nil {
@@ -99,9 +101,15 @@ func encodeMMDB(fx mmdbFixture) ([]byte, error) {
 			key = [16]byte{12: a4[0], 13: a4[1], 14: a4[2], 15: a4[3]}
 			bits += 96
 		}
-		ref := 1 + data.Len()
-		if err := data.val(nw.data); err != nil {
+		var rec enc
+		if err := rec.val(nw.data); err != nil {
 			return nil, fmt.Errorf("%s: %w", pfx, err)
+		}
+		ref, ok := refs[rec.String()]
+		if !ok {
+			ref = 1 + data.Len()
+			refs[rec.String()] = ref
+			data.Write(rec.Bytes())
 		}
 		if err := root.insert(key, bits, ref); err != nil {
 			return nil, fmt.Errorf("%s: %w", pfx, err)

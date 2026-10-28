@@ -33,7 +33,6 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
-	"sort"
 	"strings"
 
 	"github.com/haxqer/ip2geo"
@@ -90,6 +89,14 @@ type Stats struct {
 	// not iterated.
 	Networks int
 
+	// DistinctRecords is the number of distinct data records in the source
+	// that those networks point to, counted by their offset in the source's
+	// data section. Each one is decoded once, however many networks share
+	// it. Source records that differ only in fields the profile does not
+	// keep become one entry of Records, so Records is at most
+	// DistinctRecords + 1 (the gap record).
+	DistinctRecords int
+
 	// Records is the number of distinct records in the record table. It
 	// includes record 0, which is reserved for gaps (addresses without data),
 	// and one record per distinct combination of the fields the profile
@@ -115,33 +122,9 @@ type Stats struct {
 
 // String renders the stats for logging.
 func (s Stats) String() string {
-	return fmt.Sprintf("profile=%s networks=%d records=%d strings=%d v4ranges=%d v6ranges=%d size=%.2fMB",
-		s.Profile, s.Networks, s.Records, s.Strings, s.V4Ranges, s.V6Ranges, float64(s.Bytes)/1024/1024)
-}
-
-type srcRecord struct {
-	Continent struct {
-		Code string `maxminddb:"code"`
-	} `maxminddb:"continent"`
-	Country struct {
-		ISOCode   string            `maxminddb:"iso_code"`
-		GeoNameID uint32            `maxminddb:"geoname_id"`
-		Names     map[string]string `maxminddb:"names"`
-	} `maxminddb:"country"`
-	City struct {
-		GeoNameID uint32            `maxminddb:"geoname_id"`
-		Names     map[string]string `maxminddb:"names"`
-	} `maxminddb:"city"`
-	Location struct {
-		Lat *float64 `maxminddb:"latitude"`
-		Lon *float64 `maxminddb:"longitude"`
-		Acc uint16   `maxminddb:"accuracy_radius"`
-		TZ  string   `maxminddb:"time_zone"`
-	} `maxminddb:"location"`
-	Subdivisions []struct {
-		ISOCode string            `maxminddb:"iso_code"`
-		Names   map[string]string `maxminddb:"names"`
-	} `maxminddb:"subdivisions"`
+	return fmt.Sprintf("profile=%s networks=%d distinct=%d records=%d strings=%d v4ranges=%d v6ranges=%d size=%.2fMB",
+		s.Profile, s.Networks, s.DistinctRecords, s.Records, s.Strings, s.V4Ranges, s.V6Ranges,
+		float64(s.Bytes)/1024/1024)
 }
 
 type recKey struct {
@@ -171,17 +154,13 @@ func (in *interner) id(s string) uint32 {
 	return v
 }
 
-type rangeEntry struct {
-	start, last uint32
-	s16, l16    [16]byte
-	rec         uint32
-}
-
 type buildResult struct {
 	strs     []string
-	recs     []recKey
-	v4b, v6b []boundary
+	recs     blockList[recKey]
+	v4b      blockList[boundary4]
+	v6b      blockList[boundary6]
 	networks int
+	distinct int // distinct source data records (data offsets)
 }
 
 // normalize validates o and fills in the defaults. It does no I/O.
@@ -258,46 +237,41 @@ func buildData(srcMMDB string, opts *Options) (*buildResult, error) {
 	// handed to a network: a network whose kept fields are all empty gets its
 	// own non-zero id, so the reader reports it as found.
 	recKeys := map[recKey]uint32{}
-	recs := []recKey{{}}
+	var recs blockList[recKey]
+	recs.push(recKey{})
 
-	var v4, v6 []rangeEntry
+	// Networks share data records (GeoIP2-City: 10.2M networks, 0.9M
+	// records), so each data offset is decoded once and mapped to its record
+	// id. Records are still numbered, and strings interned, in the order the
+	// networks first reach them, so the output does not change.
+	byOffset := map[uintptr]uint32{}
+	dec := newSrcDecoder(opts.Profile, opts.Lang)
+	var src srcRecord
+
+	var v4 merger4
+	var v6 merger6
 	networks := 0
 
 	for result := range db.Networks() {
-		var s srcRecord
-		if err := result.Decode(&s); err != nil {
+		// Check the error first: a failed result carries no valid offset.
+		if err := result.Err(); err != nil {
 			return nil, fmt.Errorf("mmdb: %q: decode network %s: %w", srcMMDB, result.Prefix(), err)
 		}
 		networks++
 
-		var k recKey
-		k.countryISO = strs.id(s.Country.ISOCode)
-		k.countryName = strs.id(s.Country.Names[opts.Lang])
-		k.continent = strs.id(s.Continent.Code)
-		k.countryGeo = s.Country.GeoNameID
-		if opts.Profile >= ip2geo.ProfileRegion && len(s.Subdivisions) > 0 {
-			top := s.Subdivisions[0]
-			k.regionISO = strs.id(top.ISOCode)
-			k.regionName = strs.id(top.Names[opts.Lang])
-		}
-		if opts.Profile >= ip2geo.ProfileCity {
-			k.cityName = strs.id(s.City.Names[opts.Lang])
-			k.cityGeo = s.City.GeoNameID
-			if s.Location.Lat != nil {
-				k.lat = int32(math.Round(*s.Location.Lat * scale))
-			}
-			if s.Location.Lon != nil {
-				k.lon = int32(math.Round(*s.Location.Lon * scale))
-			}
-			k.acc = s.Location.Acc
-			k.tz = strs.id(s.Location.TZ)
-		}
-
-		recID, ok := recKeys[k]
+		off := result.Offset()
+		recID, ok := byOffset[off]
 		if !ok {
-			recID = uint32(len(recs))
-			recKeys[k] = recID
-			recs = append(recs, k)
+			if err := dec.decode(result, &src); err != nil {
+				return nil, fmt.Errorf("mmdb: %q: decode network %s: %w", srcMMDB, result.Prefix(), err)
+			}
+			k := src.key(opts.Profile, scale, strs)
+			if recID, ok = recKeys[k]; !ok {
+				recID = uint32(recs.n)
+				recKeys[k] = recID
+				recs.push(k)
+			}
+			byOffset[off] = recID
 		}
 
 		pfx := result.Prefix()
@@ -310,10 +284,10 @@ func buildData(srcMMDB string, opts *Options) (*buildResult, error) {
 				bits -= 96
 			}
 			last := start | uint32((uint64(1)<<(32-bits))-1)
-			v4 = append(v4, rangeEntry{start: start, last: last, rec: recID})
+			v4.add(range4{start: start, last: last, rec: recID})
 		} else {
 			s16 := addr.As16()
-			v6 = append(v6, rangeEntry{s16: s16, l16: lastV6(s16, pfx.Bits()), rec: recID})
+			v6.add(range6{start: s16, last: lastV6(s16, pfx.Bits()), rec: recID})
 		}
 	}
 
@@ -324,18 +298,20 @@ func buildData(srcMMDB string, opts *Options) (*buildResult, error) {
 	return &buildResult{
 		strs:     strs.list,
 		recs:     recs,
-		v4b:      mergeV4(v4),
-		v6b:      mergeV6(v6),
+		v4b:      v4.finish(),
+		v6b:      v6.finish(),
 		networks: networks,
+		distinct: len(byOffset),
 	}, nil
 }
 
 // Open builds the compact database in memory directly from a MaxMind City
 // .mmdb and returns a ready-to-use *ip2geo.Reader. No intermediate file and no
 // command-line tool are involved — this is the one-call, drop-in library entry
-// point. Building scans the whole source database, which takes about half a
-// minute and about 2 GiB of memory for a City source;
-// call it once at startup, or use Build + ip2geo.Open to cache the result.
+// point. Building scans the whole source database, which takes about 2
+// seconds and peaks at about 450 MiB of memory for a GeoIP2-City source
+// (ProfileCity, Apple M3); call it once at startup, or use Build +
+// ip2geo.Open to cache the result.
 //
 // Errors wrap ErrOptions, ErrDatabaseType, ErrLanguage or ErrStringTooLong
 // when the options or the source database are unsuitable, and the underlying
@@ -345,9 +321,14 @@ func Open(srcMMDB string, opts Options) (*ip2geo.Reader, error) {
 	if err != nil {
 		return nil, err
 	}
-	var buf bytes.Buffer
-	if _, err := writeAll(&buf, opts, br); err != nil {
+	// Encode into one buffer of the exact size instead of a growing one.
+	size := encodedSize(opts.Profile, br)
+	buf := bytes.NewBuffer(make([]byte, 0, size))
+	if _, err := writeAll(buf, opts, br); err != nil {
 		return nil, fmt.Errorf("mmdb: encode: %w", err)
+	}
+	if buf.Len() != size {
+		return nil, fmt.Errorf("mmdb: encode: wrote %d bytes, computed %d", buf.Len(), size)
 	}
 	r, err := ip2geo.OpenBytes(buf.Bytes())
 	if err != nil {
@@ -380,8 +361,8 @@ func Build(srcMMDB, outPath string, opts Options) (*Stats, error) {
 		return nil, err
 	}
 	return &Stats{
-		Profile: opts.Profile, Networks: br.networks, Records: len(br.recs),
-		Strings: len(br.strs), V4Ranges: len(br.v4b), V6Ranges: len(br.v6b), Bytes: n,
+		Profile: opts.Profile, Networks: br.networks, DistinctRecords: br.distinct, Records: br.recs.n,
+		Strings: len(br.strs), V4Ranges: br.v4b.n, V6Ranges: br.v6b.n, Bytes: n,
 	}, nil
 }
 
@@ -427,115 +408,71 @@ func writeFileAtomic(path string, write func(io.Writer) (int64, error)) (n int64
 	return n, nil
 }
 
-// boundary starts a range of addresses that maps to record rec, up to the
-// next boundary. rec 0 marks a gap (no data).
-type boundary struct {
-	start uint32
-	s16   [16]byte
-	rec   uint32
-}
-
-// mergeV4 turns IPv4 networks into sorted range boundaries, merging adjacent
-// networks with the same record and emitting a rec-0 boundary after a run
-// that is followed by a gap. Networks must not overlap and must not use
-// rec 0, which buildData reserves for gaps.
-func mergeV4(in []rangeEntry) []boundary {
-	sort.Slice(in, func(i, j int) bool { return in[i].start < in[j].start })
-	var out []boundary
-	var expected uint64
-	var lastRec uint32
-	for _, e := range in {
-		if uint64(e.start) > expected && lastRec != 0 {
-			out = append(out, boundary{start: uint32(expected), rec: 0})
-			lastRec = 0
-		}
-		if e.rec != lastRec {
-			out = append(out, boundary{start: e.start, rec: e.rec})
-			lastRec = e.rec
-		}
-		expected = uint64(e.last) + 1
-	}
-	if lastRec != 0 && expected <= math.MaxUint32 {
-		out = append(out, boundary{start: uint32(expected), rec: 0})
-	}
-	return out
-}
-
-// mergeV6 is mergeV4 for IPv6 networks.
-func mergeV6(in []rangeEntry) []boundary {
-	sort.Slice(in, func(i, j int) bool { return cmp16b(in[i].s16, in[j].s16) < 0 })
-	var out []boundary
-	var expected [16]byte
-	haveExpected := false
-	var lastRec uint32
-	for _, e := range in {
-		if lastRec != 0 {
-			if haveExpected && cmp16b(e.s16, expected) > 0 {
-				out = append(out, boundary{s16: expected, rec: 0})
-				lastRec = 0
-			} else if !haveExpected && e.s16 != expected {
-				out = append(out, boundary{s16: expected, rec: 0})
-				lastRec = 0
-			}
-		}
-		if e.rec != lastRec {
-			out = append(out, boundary{s16: e.s16, rec: e.rec})
-			lastRec = e.rec
-		}
-		next, overflow := inc16(e.l16)
-		expected = next
-		haveExpected = !overflow
-	}
-	if lastRec != 0 && haveExpected {
-		out = append(out, boundary{s16: expected, rec: 0})
-	}
-	return out
-}
-
 // writeAll encodes a GEO1 database. String lengths must already have been
-// checked by checkStrings.
+// checked by checkStrings. encodedSize must match what it writes.
 func writeAll(w io.Writer, opts Options, br *buildResult) (int64, error) {
 	strs, recs, v4, v6 := br.strs, br.recs, br.v4b, br.v6b
-	cw := &countWriter{w: w}
-	var b4 [4]byte
-	var b2 [2]byte
+	// Room for a full chunk plus the longest string, so the buffer never grows.
+	cw := &chunkWriter{w: w, buf: make([]byte, 0, chunkSize+2+math.MaxUint16)}
 
-	cw.Write([]byte(magic))
-	cw.Write([]byte{version, byte(opts.Profile), opts.LatScale, 0})
+	cw.str(magic)
+	cw.bytes([]byte{version, byte(opts.Profile), opts.LatScale, 0})
 
-	putU32(cw, b4[:], uint32(len(strs)))
+	cw.u32(uint32(len(strs)))
 	for _, s := range strs {
-		binary.LittleEndian.PutUint16(b2[:], uint16(len(s)))
-		cw.Write(b2[:])
-		cw.Write([]byte(s))
+		cw.u16(uint16(len(s)))
+		cw.str(s)
 	}
 
-	putU32(cw, b4[:], uint32(len(recs)))
+	cw.u32(uint32(recs.n))
 	rw := ip2geo.RecWidth(opts.Profile)
-	binary.LittleEndian.PutUint16(b2[:], uint16(rw))
-	cw.Write(b2[:])
+	cw.u16(uint16(rw))
 	rec := make([]byte, rw)
-	for _, k := range recs {
-		putRecordU32(rec, opts.Profile, k)
-		cw.Write(rec)
+	for _, blk := range recs.blocks {
+		for _, k := range blk {
+			putRecordU32(rec, opts.Profile, k)
+			cw.bytes(rec)
+		}
 	}
 
-	putU32(cw, b4[:], uint32(len(v4)))
-	for _, e := range v4 {
-		putU32(cw, b4[:], e.start)
+	cw.u32(uint32(v4.n))
+	for _, blk := range v4.blocks {
+		for _, b := range blk {
+			cw.u32(b.start)
+		}
 	}
-	for _, e := range v4 {
-		putU32(cw, b4[:], e.rec)
+	for _, blk := range v4.blocks {
+		for _, b := range blk {
+			cw.u32(b.rec)
+		}
 	}
 
-	putU32(cw, b4[:], uint32(len(v6)))
-	for _, e := range v6 {
-		cw.Write(e.s16[:])
+	cw.u32(uint32(v6.n))
+	for _, blk := range v6.blocks {
+		for i := range blk {
+			cw.bytes(blk[i].start[:])
+		}
 	}
-	for _, e := range v6 {
-		putU32(cw, b4[:], e.rec)
+	for _, blk := range v6.blocks {
+		for _, b := range blk {
+			cw.u32(b.rec)
+		}
 	}
+	cw.flush()
 	return cw.n, cw.err
+}
+
+// encodedSize returns the number of bytes writeAll writes for br.
+func encodedSize(p ip2geo.Profile, br *buildResult) int {
+	n := len(magic) + 4 // magic; version, profile, LatScale, reserved
+	n += 4              // string count
+	for _, s := range br.strs {
+		n += 2 + len(s)
+	}
+	n += 4 + 2 + br.recs.n*ip2geo.RecWidth(p) // record count, width, records
+	n += 4 + br.v4b.n*(4+4)                   // count, starts, record ids
+	n += 4 + br.v6b.n*(16+4)
+	return n
 }
 
 func putRecordU32(dst []byte, p ip2geo.Profile, k recKey) {
@@ -558,53 +495,37 @@ func putRecordU32(dst []byte, p ip2geo.Profile, k recKey) {
 	}
 }
 
-type countWriter struct {
+// chunkSize is about how many bytes chunkWriter collects before it passes
+// them on.
+const chunkSize = 64 << 10
+
+// chunkWriter encodes into a buffer that it hands to w in chunks of about
+// chunkSize bytes, so that the millions of 4-byte values of a city database
+// do not each cost a call to w.Write. n counts the bytes w accepted; after
+// the first error nothing more is written.
+type chunkWriter struct {
 	w   io.Writer
+	buf []byte
 	n   int64
 	err error
 }
 
-func (c *countWriter) Write(p []byte) {
-	if c.err != nil {
-		return
+func (c *chunkWriter) flush() {
+	if c.err == nil && len(c.buf) > 0 {
+		var n int
+		n, c.err = c.w.Write(c.buf)
+		c.n += int64(n)
 	}
-	n, err := c.w.Write(p)
-	c.n += int64(n)
-	c.err = err
+	c.buf = c.buf[:0]
 }
 
-func putU32(c *countWriter, buf []byte, v uint32) {
-	binary.LittleEndian.PutUint32(buf, v)
-	c.Write(buf)
+func (c *chunkWriter) full() {
+	if len(c.buf) >= chunkSize {
+		c.flush()
+	}
 }
 
-func cmp16b(a, b [16]byte) int {
-	for i := 0; i < 16; i++ {
-		if a[i] != b[i] {
-			if a[i] < b[i] {
-				return -1
-			}
-			return 1
-		}
-	}
-	return 0
-}
-
-func inc16(a [16]byte) (res [16]byte, overflow bool) {
-	res = a
-	for i := 15; i >= 0; i-- {
-		res[i]++
-		if res[i] != 0 {
-			return res, false
-		}
-	}
-	return res, true
-}
-
-func lastV6(start [16]byte, bits int) [16]byte {
-	last := start
-	for i := bits; i < 128; i++ {
-		last[i/8] |= 1 << (7 - uint(i%8))
-	}
-	return last
-}
+func (c *chunkWriter) bytes(p []byte) { c.buf = append(c.buf, p...); c.full() }
+func (c *chunkWriter) str(s string)   { c.buf = append(c.buf, s...); c.full() }
+func (c *chunkWriter) u16(v uint16)   { c.buf = binary.LittleEndian.AppendUint16(c.buf, v); c.full() }
+func (c *chunkWriter) u32(v uint32)   { c.buf = binary.LittleEndian.AppendUint32(c.buf, v); c.full() }
