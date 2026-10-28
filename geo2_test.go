@@ -562,7 +562,7 @@ func TestGEO2Accepts(t *testing.T) {
 		}()},
 		{name: "unknown sections first and in the middle", f: func() *g2file {
 			f := toGEO2(excTestDB(), g2opts{meta: testMeta})
-			f.secs = append([]g2sec{{0, []byte{1}}, {12, nil}}, f.secs...)
+			f.secs = append([]g2sec{{0, []byte{1}}, {15, nil}}, f.secs...)
 			f.secs = append(f.secs[:6], append([]g2sec{{1 << 31, make([]byte, 100)}}, f.secs[6:]...)...)
 			return f
 		}()},

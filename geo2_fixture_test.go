@@ -30,6 +30,11 @@ const (
 	sV6IDs    = 9
 	sV6ExcIdx = 10
 	sV6ExcLo  = 11
+
+	// Revision 2.1.
+	sXFields  = 12
+	sXRecords = 13
+	sLangs    = 14
 )
 
 var castagnoli = crc32.MakeTable(crc32.Castagnoli)
@@ -133,8 +138,9 @@ type g2meta struct {
 
 type g2opts struct {
 	meta     g2meta
-	idWidth  byte // 0: the minimal width
-	emptyExc bool // write empty exception sections when there are no exceptions
+	idWidth  byte   // 0: the minimal width
+	emptyExc bool   // write empty exception sections when there are no exceptions
+	ext      *g2ext // revision 2.1 extension fields and languages
 }
 
 // geo1Str is GEO1's reading of a string id: 0 and ids past the table are "".
@@ -152,17 +158,24 @@ func (d *testDB) geo1Field(i, f int) uint32 {
 
 // toGEO2 encodes the logical database of a GEO1 test database as GEO2. The
 // strings are numbered "" first, then the strings of u16 fields in sorted
-// order, then the other city names, then the META strings not seen yet;
-// equal strings share an id.
+// order, then the other city names (or ASN organizations), then the META
+// strings not seen yet, then the strings of o.ext; equal strings share an
+// id. With o.ext the file has XFIELDS, XRECORDS and LANGS (revision 2.1).
+//
+// An ASN test database (profile 3) has two u32 fields per record: the AS
+// number and the organization's string id.
 func toGEO2(d *testDB, o g2opts) *g2file {
 	le := binary.LittleEndian
 	p := Profile(d.profile)
 	nrec := int(d.recCount)
-	u16Fields := []int{0, 1, 2} // country ISO, country name, continent
-	if p >= ProfileRegion {
+	var u16Fields []int
+	if p != ProfileASN {
+		u16Fields = []int{0, 1, 2} // country ISO, country name, continent
+	}
+	if p == ProfileRegion || p == ProfileCity {
 		u16Fields = append(u16Fields, 4, 5) // region ISO, region name
 	}
-	if p >= ProfileCity {
+	if p == ProfileCity {
 		u16Fields = append(u16Fields, 11) // time zone
 	}
 	ids := map[string]uint32{"": 0}
@@ -191,14 +204,26 @@ func toGEO2(d *testDB, o g2opts) *g2file {
 		panic("too many u16 strings for a fixture")
 	}
 	set = map[string]bool{}
-	if p >= ProfileCity {
+	if u24 := map[Profile]int{ProfileCity: 6, ProfileASN: 1}[p]; u24 > 0 {
 		for i := 1; i < nrec; i++ {
-			set[d.geo1Str(d.geo1Field(i, 6))] = true
+			set[d.geo1Str(d.geo1Field(i, u24))] = true
 		}
 	}
 	addSorted(set)
 	m := o.meta
 	addSorted(map[string]bool{m.sourceType: true, m.language: true, m.description: true, m.builder: true})
+	if o.ext != nil {
+		set = map[string]bool{}
+		for _, x := range o.ext.recs {
+			for _, s := range x.strs() {
+				set[s] = true
+			}
+		}
+		for _, l := range o.ext.langs {
+			set[l] = true
+		}
+		addSorted(set)
+	}
 
 	var strIdx, strBlob []byte
 	strIdx = le.AppendUint32(strIdx, 0)
@@ -207,11 +232,17 @@ func toGEO2(d *testDB, o g2opts) *g2file {
 		strIdx = le.AppendUint32(strIdx, uint32(len(strBlob)))
 	}
 
-	width := map[Profile]int{ProfileCountry: 10, ProfileRegion: 14, ProfileCity: 33}[p]
+	width := map[Profile]int{ProfileCountry: 10, ProfileRegion: 14, ProfileCity: 33, ProfileASN: 7}[p]
 	recs := make([]byte, nrec*width)
 	for i := 1; i < nrec; i++ {
 		r := recs[i*width:]
 		sid := func(f int) uint32 { return ids[d.geo1Str(d.geo1Field(i, f))] }
+		if p == ProfileASN {
+			le.PutUint32(r[0:], d.geo1Field(i, 0))
+			c := sid(1)
+			r[4], r[5], r[6] = byte(c), byte(c>>8), byte(c>>16)
+			continue
+		}
 		le.PutUint16(r[0:], uint16(sid(0)))
 		le.PutUint16(r[2:], uint16(sid(1)))
 		le.PutUint16(r[4:], uint16(sid(2)))
@@ -290,6 +321,9 @@ func toGEO2(d *testDB, o g2opts) *g2file {
 	if len(excIdx) > 0 || o.emptyExc {
 		f.secs = append(f.secs, g2sec{sV6ExcIdx, excIdx}, g2sec{sV6ExcLo, excLo})
 	}
+	if o.ext != nil {
+		f.secs = append(f.secs, o.ext.sections(p, nrec, ids)...)
+	}
 	return f
 }
 
@@ -297,41 +331,83 @@ func toGEO2(d *testDB, o g2opts) *g2file {
 // aliases of docs/FORMAT.md, a linear search for the range, and the GEO1
 // reading of the record.
 func (d *testDB) lookup(a netip.Addr) (Record, bool) {
-	var id uint32
-	find4 := func(k uint32) uint32 {
-		id := uint32(0)
-		for i, s := range d.v4starts {
-			if s <= k {
-				id = d.v4rec[i]
-			}
-		}
-		return id
-	}
-	switch {
-	case a.Is4() || a.Is4In6():
-		b := a.As4()
-		id = find4(binary.BigEndian.Uint32(b[:]))
-	case a.IsValid():
-		k := a.As16()
-		switch {
-		case k[0] == 0x20 && k[1] == 0x02:
-			id = find4(binary.BigEndian.Uint32(k[2:6]))
-		case k[0] == 0x20 && k[1] == 0x01 && k[2] == 0 && k[3] == 0:
-			id = find4(binary.BigEndian.Uint32(k[4:8]))
-		case bytes.Equal(k[:12], make([]byte, 12)):
-			id = find4(binary.BigEndian.Uint32(k[12:]))
-		default:
-			for i, s := range d.v6starts {
-				if bytes.Compare(s[:], k[:]) <= 0 {
-					id = d.v6rec[i]
-				}
-			}
-		}
-	}
+	id := d.lookupID(a)
 	if id == 0 {
 		return Record{}, false
 	}
+	return d.record(id), true
+}
+
+// refKey is the table and key the spec looks a up with: IPv4 (with the
+// aliases of docs/FORMAT.md mapped) or IPv6. valid is false for the zero
+// Addr.
+func refKey(a netip.Addr) (k [16]byte, v4 uint32, is4, valid bool) {
+	switch {
+	case a.Is4() || a.Is4In6():
+		b := a.As4()
+		return k, binary.BigEndian.Uint32(b[:]), true, true
+	case !a.IsValid():
+		return k, 0, false, false
+	}
+	k = a.As16()
+	switch {
+	case k[0] == 0x20 && k[1] == 0x02:
+		return k, binary.BigEndian.Uint32(k[2:6]), true, true
+	case k[0] == 0x20 && k[1] == 0x01 && k[2] == 0 && k[3] == 0:
+		return k, binary.BigEndian.Uint32(k[4:8]), true, true
+	case bytes.Equal(k[:12], make([]byte, 12)):
+		return k, binary.BigEndian.Uint32(k[12:]), true, true
+	}
+	return k, 0, false, true
+}
+
+// index4 and index6 return the index of the last start <= the key, -1 if
+// none, by linear search.
+func (d *testDB) index4(k uint32) int {
+	i := -1
+	for j, s := range d.v4starts {
+		if s <= k {
+			i = j
+		}
+	}
+	return i
+}
+
+func (d *testDB) index6(k [16]byte) int {
+	i := -1
+	for j, s := range d.v6starts {
+		if bytes.Compare(s[:], k[:]) <= 0 {
+			i = j
+		}
+	}
+	return i
+}
+
+// lookupID is the record id of a, 0 when it is not covered.
+func (d *testDB) lookupID(a netip.Addr) uint32 {
+	k, v4, is4, valid := refKey(a)
+	switch {
+	case !valid:
+		return 0
+	case is4:
+		if i := d.index4(v4); i >= 0 {
+			return d.v4rec[i]
+		}
+	default:
+		if i := d.index6(k); i >= 0 {
+			return d.v6rec[i]
+		}
+	}
+	return 0
+}
+
+// record is the GEO1 reading of record id; an ASN record has no Record
+// fields.
+func (d *testDB) record(id uint32) Record {
 	p := Profile(d.profile)
+	if p == ProfileASN {
+		return Record{}
+	}
 	div := math.Pow10(int(d.latScale))
 	f := func(k int) uint32 { return d.geo1Field(int(id), k) }
 	rec := Record{
@@ -351,7 +427,7 @@ func (d *testDB) lookup(a netip.Addr) (Record, bool) {
 		rec.AccuracyRadius = uint16(f(10))
 		rec.TimeZone = d.geo1Str(f(11))
 	}
-	return rec, true
+	return rec
 }
 
 // excTestDB is cityTestDB with a run of IPv6 starts sharing their top half,
@@ -502,4 +578,417 @@ func probeAddrs(d *testDB, seed uint64, n int) []netip.Addr {
 		}
 	}
 	return out
+}
+
+// Field set bits of XFIELDS, from the spec's table.
+const (
+	xEU           = 1 << 0
+	xContinent    = 1 << 1
+	xRegistered   = 1 << 2
+	xSubdivisions = 1 << 3
+	xPostal       = 1 << 4
+	xMetro        = 1 << 5
+	xTraits       = 1 << 6
+	xLocation     = 1 << 7
+)
+
+// Name kinds, in the spec's order; an xRec's names are indexed by them.
+const (
+	kCountry = iota
+	kRegion
+	kCity
+	kContinent
+	kRegion2
+	kRegistered
+	kRepresented
+	nKinds
+)
+
+// xCountry is a registered or represented country.
+type xCountry struct {
+	iso, name string
+	geo       uint32
+	eu        bool
+}
+
+// xRec is the extension content of one record: every field of every set,
+// of which the encoder writes the sets the file has, and its names in the
+// extra languages, names[j-1] for LANGS[j] ("" for none).
+type xRec struct {
+	eu                 bool
+	contName           string
+	contGeo            uint32
+	reg, rep           xCountry
+	repType            string
+	sub1Geo            uint32
+	sub2ISO, sub2Name  string
+	sub2Geo            uint32
+	postal             string
+	metro              uint16
+	anycast, anon, sat bool
+	hasCoords, hasAcc  bool
+	names              [][nKinds]string
+}
+
+func (x *xRec) strs() []string {
+	out := []string{x.contName, x.reg.iso, x.reg.name, x.rep.iso, x.rep.name, x.repType, x.sub2ISO, x.sub2Name, x.postal}
+	for _, n := range x.names {
+		out = append(out, n[:]...)
+	}
+	return out
+}
+
+// g2ext is the revision 2.1 content of a fixture: the field set bits, the
+// languages (nil for one language: no LANGS section) and an xRec per
+// record id. recs[0] must be zero; missing records are zero.
+type g2ext struct {
+	fields uint32
+	langs  []string
+	recs   []xRec
+}
+
+func (e *g2ext) rec(id uint32) xRec {
+	if int(id) < len(e.recs) {
+		return e.recs[id]
+	}
+	return xRec{}
+}
+
+// kinds lists the name kinds an extra language stores for profile p.
+func (e *g2ext) kinds(p Profile) []int {
+	k := []int{kCountry}
+	if p >= ProfileRegion {
+		k = append(k, kRegion)
+	}
+	if p >= ProfileCity {
+		k = append(k, kCity)
+	}
+	if e.fields&xContinent != 0 {
+		k = append(k, kContinent)
+	}
+	if e.fields&xSubdivisions != 0 {
+		k = append(k, kRegion2)
+	}
+	if e.fields&xRegistered != 0 {
+		k = append(k, kRegistered, kRepresented)
+	}
+	return k
+}
+
+// sections encodes XFIELDS, XRECORDS and, with two languages or more,
+// LANGS. Each entry is the blocks of the sets present in bit order, then
+// the names of each extra language.
+func (e *g2ext) sections(p Profile, nrec int, ids map[string]uint32) []g2sec {
+	le := binary.LittleEndian
+	kinds := e.kinds(p)
+	var xr []byte
+	for i := range nrec {
+		x := e.rec(uint32(i))
+		u24 := func(s string) {
+			id := ids[s]
+			xr = append(xr, byte(id), byte(id>>8), byte(id>>16))
+		}
+		u32 := func(v uint32) { xr = le.AppendUint32(xr, v) }
+		flags := func(bits ...bool) {
+			var c byte
+			for k, b := range bits {
+				if b {
+					c |= 1 << k
+				}
+			}
+			xr = append(xr, c)
+		}
+		if e.fields&xEU != 0 {
+			flags(x.eu)
+		}
+		if e.fields&xContinent != 0 {
+			u24(x.contName)
+			u32(x.contGeo)
+		}
+		if e.fields&xRegistered != 0 {
+			u24(x.reg.iso)
+			u24(x.reg.name)
+			u32(x.reg.geo)
+			u24(x.rep.iso)
+			u24(x.rep.name)
+			u32(x.rep.geo)
+			u24(x.repType)
+			flags(x.reg.eu, x.rep.eu)
+		}
+		if e.fields&xSubdivisions != 0 {
+			u32(x.sub1Geo)
+			u24(x.sub2ISO)
+			u24(x.sub2Name)
+			u32(x.sub2Geo)
+		}
+		if e.fields&xPostal != 0 {
+			u24(x.postal)
+		}
+		if e.fields&xMetro != 0 {
+			xr = le.AppendUint16(xr, x.metro)
+		}
+		if e.fields&xTraits != 0 {
+			flags(x.anycast, x.anon, x.sat)
+		}
+		if e.fields&xLocation != 0 {
+			flags(x.hasCoords, x.hasAcc)
+		}
+		for j := 1; j < len(e.langs); j++ {
+			for _, k := range kinds {
+				var s string
+				if j-1 < len(x.names) {
+					s = x.names[j-1][k]
+				}
+				u24(s)
+			}
+		}
+	}
+	secs := []g2sec{{sXFields, le.AppendUint32(le.AppendUint32(nil, e.fields), 0)}, {sXRecords, xr}}
+	if len(e.langs) > 0 {
+		var l []byte
+		for _, s := range e.langs {
+			l = le.AppendUint32(l, ids[s])
+		}
+		secs = append(secs, g2sec{sLangs, l})
+	}
+	return secs
+}
+
+// details is the reference LookupDetails answer for record id of d with
+// extension e (nil for none), in language j of e.langs (0: the primary).
+func (e *g2ext) details(d *testDB, id uint32, j int) Details {
+	var out Details
+	p := Profile(d.profile)
+	if p == ProfileASN {
+		out.ASN = ASN{Number: d.geo1Field(int(id), 0), Organization: d.geo1Str(d.geo1Field(int(id), 1))}
+		return out
+	}
+	out.Record = d.record(id)
+	if e == nil {
+		return out
+	}
+	x, f := e.rec(id), e.fields
+	if f&xEU != 0 {
+		out.IsInEuropeanUnion = x.eu
+	}
+	if f&xContinent != 0 {
+		out.ContinentName, out.ContinentGeoNameID = x.contName, x.contGeo
+	}
+	if f&xRegistered != 0 {
+		out.RegisteredCountry = Country{x.reg.iso, x.reg.name, x.reg.geo, x.reg.eu}
+		out.RepresentedCountry = Country{x.rep.iso, x.rep.name, x.rep.geo, x.rep.eu}
+		out.RepresentedCountryType = x.repType
+	}
+	if f&xSubdivisions != 0 {
+		out.RegionGeoNameID, out.Region2ISO, out.Region2Name, out.Region2GeoNameID = x.sub1Geo, x.sub2ISO, x.sub2Name, x.sub2Geo
+	}
+	if f&xPostal != 0 {
+		out.PostalCode = x.postal
+	}
+	if f&xMetro != 0 {
+		out.MetroCode = x.metro
+	}
+	if f&xTraits != 0 {
+		out.IsAnycast, out.IsAnonymousProxy, out.IsSatelliteProvider = x.anycast, x.anon, x.sat
+	}
+	if f&xLocation != 0 {
+		out.HasCoordinates, out.HasAccuracyRadius = x.hasCoords, x.hasAcc
+	}
+	if j == 0 || j-1 >= len(x.names) {
+		return out
+	}
+	dst := [nKinds]*string{&out.CountryName, &out.RegionName, &out.City, &out.ContinentName,
+		&out.Region2Name, &out.RegisteredCountry.Name, &out.RepresentedCountry.Name}
+	for _, k := range e.kinds(p) {
+		if s := x.names[j-1][k]; s != "" { // else the primary language's name stays
+			*dst[k] = s
+		}
+	}
+	return out
+}
+
+// lookupDetails is the reference LookupDetails answer for a.
+func (e *g2ext) lookupDetails(d *testDB, a netip.Addr, j int) (Details, bool) {
+	id := d.lookupID(a)
+	if id == 0 {
+		return Details{}, false
+	}
+	return e.details(d, id, j), true
+}
+
+// randomExt returns an extension with field sets fields and languages
+// langs for d's records: random values, names from a small pool, and about
+// a third of the extra language names missing.
+func randomExt(seed uint64, d *testDB, fields uint32, langs []string) *g2ext {
+	rng := rand.New(rand.NewPCG(seed, 0xe57))
+	pool := []string{""}
+	for i := range 40 {
+		pool = append(pool, fmt.Sprintf("x%d-%x", i, rng.Uint32()))
+	}
+	str := func() string { return pool[rng.IntN(len(pool))] }
+	b := func() bool { return rng.IntN(2) == 0 }
+	e := &g2ext{fields: fields, langs: langs, recs: make([]xRec, d.recCount)}
+	for i := 1; i < len(e.recs); i++ {
+		x := xRec{
+			eu: b(), contName: str(), contGeo: rng.Uint32(),
+			reg:     xCountry{str(), str(), rng.Uint32(), b()},
+			rep:     xCountry{str(), str(), rng.Uint32(), b()},
+			repType: str(), sub1Geo: rng.Uint32(), sub2ISO: str(), sub2Name: str(), sub2Geo: rng.Uint32(),
+			postal: str(), metro: uint16(rng.Uint32()),
+			anycast: b(), anon: b(), sat: b(), hasCoords: b(), hasAcc: b(),
+		}
+		for range max(len(langs)-1, 0) {
+			var n [nKinds]string
+			for k := range n {
+				if rng.IntN(3) != 0 {
+					n[k] = str()
+				}
+			}
+			x.names = append(x.names, n)
+		}
+		e.recs[i] = x
+	}
+	return e
+}
+
+// laExt is a hand-written extension of cityTestDB with every field set and
+// three languages: record 1 (Los Angeles) has German names except for the
+// city and French ones for the city alone; record 2 (Berlin) has none.
+func laExt() *g2ext {
+	return &g2ext{
+		fields: 0xFF,
+		langs:  []string{"en", "de", "fr"},
+		recs: []xRec{{}, {
+			contName: "North America", contGeo: 6255149,
+			reg: xCountry{"US", "United States", 6252001, false}, rep: xCountry{"DE", "Germany", 2921044, true},
+			repType: "military", sub1Geo: 5332921, sub2ISO: "LA", sub2Name: "Los Angeles County", sub2Geo: 5368381,
+			postal: "90001", metro: 803, anycast: true, sat: true, hasCoords: true, hasAcc: true,
+			names: [][nKinds]string{
+				{kCountry: "Vereinigte Staaten", kRegion: "Kalifornien", kContinent: "Nordamerika",
+					kRegion2: "Los Angeles", kRegistered: "Vereinigte Staaten", kRepresented: "Deutschland"},
+				{kCity: "Los Ángeles"},
+			},
+		}, {eu: true, contName: "Europe", contGeo: 6255148, hasCoords: true}},
+	}
+}
+
+// asnTestDB is an ASN database: three ASN records (the third with no
+// organization), IPv4 10.0.0.0/24 and 192.0.2.0/24, IPv6 2001:db8::/32
+// with an exception at 2001:db8::8000:0:0:0.
+func asnTestDB() *testDB {
+	recs := make([]byte, 8)
+	for _, r := range [][2]uint32{{64500, 1}, {64501, 2}, {13335, 0}} {
+		recs = binary.LittleEndian.AppendUint32(recs, r[0])
+		recs = binary.LittleEndian.AppendUint32(recs, r[1])
+	}
+	return &testDB{
+		version: version, profile: byte(ProfileASN),
+		strs:     []string{"", "EXAMPLE-AS", "Other Networks Ltd"},
+		recCount: 4, recWidth: 8, records: recs,
+		v4starts: []uint32{0, 0x0A000000, 0x0A000100, 0xC0000200, 0xC0000300},
+		v4rec:    []uint32{0, 1, 0, 3, 0},
+		v6starts: [][16]byte{{}, a16("2001:db8::"), a16("2001:db8::8000:0:0:0"), a16("2001:db9::")},
+		v6rec:    []uint32{0, 2, 1, 0},
+	}
+}
+
+// lookupRange is the reference LookupRange answer for a.
+func (d *testDB) lookupRange(a netip.Addr) (Range, bool) {
+	k, v4, is4, valid := refKey(a)
+	if !valid {
+		return Range{}, false
+	}
+	if is4 {
+		i := d.index4(v4)
+		first, last, id := uint32(0), uint32(math.MaxUint32), uint32(0)
+		if i >= 0 {
+			first, id = d.v4starts[i], d.v4rec[i]
+		}
+		if i+1 < len(d.v4starts) {
+			last = d.v4starts[i+1] - 1
+		}
+		return Range{refAddr4(first), refAddr4(last)}, id != 0
+	}
+	i := d.index6(k)
+	var first [16]byte
+	last := [16]byte{0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}
+	var id uint32
+	if i >= 0 {
+		first, id = d.v6starts[i], d.v6rec[i]
+	}
+	if i+1 < len(d.v6starts) {
+		last = add16(d.v6starts[i+1], -1)
+	}
+	// The part of the stored range outside the alias prefixes that holds k.
+	key := netip.AddrFrom16(k)
+	for _, p := range unaliased(Range{netip.AddrFrom16(first), netip.AddrFrom16(last)}) {
+		if !key.Less(p.First) && !p.Last.Less(key) {
+			return p, id != 0
+		}
+	}
+	panic(fmt.Sprintf("%v is in no part of its range", key))
+}
+
+// refAliases are the IPv6 prefixes docs/FORMAT.md maps to IPv4, ascending.
+var refAliases = []netip.Prefix{
+	netip.MustParsePrefix("::/96"), netip.MustParsePrefix("::ffff:0:0/96"),
+	netip.MustParsePrefix("2001::/32"), netip.MustParsePrefix("2002::/16"),
+}
+
+// unaliased returns the parts of IPv6 range rg outside refAliases.
+func unaliased(rg Range) []Range {
+	var out []Range
+	cur, last := rg.First.As16(), rg.Last.As16()
+	for _, p := range refAliases {
+		lo := p.Addr().As16()
+		hi := fillFrom(lo, p.Bits(), 0xFF)
+		if bytes.Compare(hi[:], cur[:]) < 0 {
+			continue
+		}
+		if bytes.Compare(lo[:], last[:]) > 0 {
+			break
+		}
+		if bytes.Compare(lo[:], cur[:]) > 0 {
+			out = append(out, Range{netip.AddrFrom16(cur), netip.AddrFrom16(add16(lo, -1))})
+		}
+		if bytes.Compare(hi[:], last[:]) >= 0 {
+			return out
+		}
+		cur = add16(hi, 1)
+	}
+	return append(out, Range{netip.AddrFrom16(cur), netip.AddrFrom16(last)})
+}
+
+// ranges is the reference Ranges list: every boundary range with data,
+// IPv4 then IPv6 (without the alias prefixes), with its record id.
+func (d *testDB) ranges() (rs []Range, ids []uint32) {
+	for i, s := range d.v4starts {
+		if d.v4rec[i] == 0 {
+			continue
+		}
+		last := uint32(math.MaxUint32)
+		if i+1 < len(d.v4starts) {
+			last = d.v4starts[i+1] - 1
+		}
+		rs, ids = append(rs, Range{refAddr4(s), refAddr4(last)}), append(ids, d.v4rec[i])
+	}
+	for i, s := range d.v6starts {
+		if d.v6rec[i] == 0 {
+			continue
+		}
+		last := [16]byte{0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}
+		if i+1 < len(d.v6starts) {
+			last = add16(d.v6starts[i+1], -1)
+		}
+		for _, p := range unaliased(Range{netip.AddrFrom16(s), netip.AddrFrom16(last)}) {
+			rs, ids = append(rs, p), append(ids, d.v6rec[i])
+		}
+	}
+	return rs, ids
+}
+
+func refAddr4(v uint32) netip.Addr {
+	var b [4]byte
+	binary.BigEndian.PutUint32(b[:], v)
+	return netip.AddrFrom4(b)
 }

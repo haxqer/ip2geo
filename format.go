@@ -47,7 +47,24 @@
 // every count against the bytes present, the record width, every record id,
 // the order of the range starts, and that nothing trails the last table.
 // Any input that opens is safe to look up in. Errors wrap ErrBadMagic,
-// ErrUnsupportedVersion, ErrCorrupt or ErrTooLarge; test them with errors.Is.
+// ErrUnsupportedVersion, ErrCorrupt or ErrTooLarge, or ErrLanguage for the
+// Language option; test them with errors.Is.
+//
+// # Optional fields, languages, ASN and ranges
+//
+// A database may keep optional field sets beside the Record fields (see
+// FieldSet: the EU flag, the continent name, the registered and
+// represented countries, a second subdivision, the postal and metro codes,
+// traits, and whether the location is known). Reader.Fields reports them,
+// and LookupDetails returns them in a Details. A database may also keep its
+// names in several languages, listed by Reader.Languages: Lookup answers in
+// the primary one unless Open is given Language, and Reader.WithLanguage
+// returns a Reader in another language that shares the database. A name
+// missing in a language is returned in the primary one. A ProfileASN
+// database maps addresses to autonomous systems, read with Reader.ASN.
+// Reader.LookupRange returns the range of addresses that share an
+// address's answer, and Reader.Ranges iterates over every range with data.
+// LookupDetails, ASN and LookupRange do not allocate either.
 //
 // # IPv4 in IPv6 form
 //
@@ -85,7 +102,8 @@ var (
 	// magic.
 	ErrBadMagic = errors.New("not an ip2geo database")
 	// ErrUnsupportedVersion means the format version is not one this
-	// package reads.
+	// package reads, or the file has a field set this package does not
+	// know (a later revision's).
 	ErrUnsupportedVersion = errors.New("unsupported format version")
 	// ErrCorrupt means the input is truncated, fails a checksum, or breaks a
 	// structural rule of its format: an unknown profile, a lat/lon scale
@@ -99,6 +117,9 @@ var (
 	// 65535 distinct strings in country, region and time zone fields, or
 	// more than 2^24-1 distinct strings in all.
 	ErrTooLarge = errors.New("database too large")
+	// ErrLanguage means a language passed to Language or WithLanguage is not one
+	// of the database's languages (see Reader.Languages).
+	ErrLanguage = errors.New("language not in database")
 )
 
 // Profile selects how much geo detail the database retains. Coarser profiles

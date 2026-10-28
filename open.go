@@ -19,6 +19,17 @@ type options struct {
 	noMmap       bool
 	skipChecksum bool
 	noCopy       bool
+	lang         string
+}
+
+// Language makes Open and OpenBytes return a Reader whose names (in Lookup,
+// LookupDetails and Ranges) are in lang, one of the database's languages.
+// A name missing in lang is returned in the primary language
+// (Metadata.Language). The empty string selects the primary language. Open
+// fails with an error wrapping ErrLanguage when the database does not have
+// lang.
+func Language(lang string) Option {
+	return func(o *options) { o.lang = lang }
 }
 
 // NoMmap makes Open read the file into the Go heap instead of memory-mapping
@@ -151,6 +162,10 @@ func openMapped(m []byte, o *options) (*Reader, error) {
 			return nil, err
 		}
 		r := g.reader(m)
+		if err := r.setLanguage(o.lang); err != nil {
+			_ = munmap(m)
+			return nil, err
+		}
 		r.mapped = true
 		runtime.AddCleanup(r, releaseMapping, m)
 		return r, nil
@@ -159,7 +174,18 @@ func openMapped(m []byte, o *options) (*Reader, error) {
 	if uerr := munmap(m); err == nil && uerr != nil {
 		return nil, fmt.Errorf("ip2geo: unmap: %w", uerr)
 	}
-	return r, err
+	if err != nil {
+		return nil, err
+	}
+	return withLanguage(r, o)
+}
+
+// withLanguage returns r with the language of the Language option.
+func withLanguage(r *Reader, o *options) (*Reader, error) {
+	if err := r.setLanguage(o.lang); err != nil {
+		return nil, err
+	}
+	return r, nil
 }
 
 func releaseMapping(m []byte) {
@@ -182,7 +208,11 @@ func releaseMapping(m []byte) {
 // every record id below the record count; a non-decreasing V4IDX from 0 to
 // the IPv4 start count and strictly ascending IPv4 starts; and strictly
 // ascending IPv6 starts with a strictly ascending, in-range exception table
-// of non-zero low halves. Sections with unknown ids are ignored.
+// of non-zero low halves. A revision 2.1 file's XFIELDS, XRECORDS and LANGS
+// sections must be well formed and consistent with the profile, the record
+// count and the string table, and an ASN file's organizations must be
+// strings of the table (rules 9 to 13). Sections with unknown ids are
+// ignored.
 //
 // For GEO1 it is the header (magic, version 1, a known profile, a lat/lon
 // scale of at most 7, a zero reserved byte), every count against the bytes
@@ -191,7 +221,8 @@ func releaseMapping(m []byte) {
 // range starts, and no trailing bytes.
 //
 // Inputs over 2 GiB are refused. Errors wrap ErrBadMagic,
-// ErrUnsupportedVersion, ErrCorrupt or ErrTooLarge.
+// ErrUnsupportedVersion, ErrCorrupt or ErrTooLarge, or ErrLanguage for a
+// Language the database does not have.
 func OpenBytes(b []byte, opts ...Option) (*Reader, error) {
 	if uint64(len(b)) > maxFileSize {
 		return nil, fmt.Errorf("ip2geo: input is %d bytes, over the %d-byte limit: %w", len(b), int64(maxFileSize), ErrTooLarge)
@@ -211,10 +242,14 @@ func openBuffer(b []byte, o *options, retain bool) (*Reader, error) {
 		if !retain {
 			b = bytes.Clone(b)
 		}
-		return g.reader(b), nil
+		return withLanguage(g.reader(b), o)
 	}
 	if len(b) < len(magic) || string(b[:len(magic)]) != magic {
 		return nil, badMagic(b)
 	}
-	return openGEO1(b)
+	r, err := openGEO1(b)
+	if err != nil {
+		return nil, err
+	}
+	return withLanguage(r, o)
 }

@@ -77,8 +77,31 @@ type Reader struct {
 	v6dir    *[1 << v6IdxBits]uint32
 	v6l2     []uint32
 
+	// Revision 2.1: the field sets, XRECORDS (one entry of xl.Width bytes
+	// per record) and its layout. A GEO1 database, and a GEO2 one without
+	// XRECORDS, has no field sets and Width 0.
+	fields FieldSet
+	xrecs  []byte
+	xl     format.XLayout
+
+	// langs lists the languages of the names, the primary one first: LANGS,
+	// or META's language alone, or nil when the file records none. lang is
+	// the index of the language Lookup and LookupDetails answer in, and
+	// when it is not 0, nameOff[k] is the offset in an XRECORDS entry of
+	// that language's u24 name of kind k, or -1 when the file has no such
+	// name. alt is set when Lookup must do more than decode: for an ASN
+	// database or a language other than the primary one.
+	langs   []string
+	lang    int
+	nameOff [format.NumNameKinds]int
+	alt     bool
+
 	meta   Metadata
 	mapped bool // the sections are in a memory mapping released by a cleanup
+
+	// owner is the Reader a WithLanguage view was made from: the one whose
+	// cleanup releases the mapping, which the view keeps reachable.
+	owner *Reader
 }
 
 // Profile reports the precision profile the database was built with.
@@ -88,11 +111,11 @@ func (r *Reader) Profile() Profile { return r.profile }
 func (r *Reader) Metadata() Metadata { return r.meta }
 
 // Close does nothing and returns nil. A memory-mapped database is unmapped
-// by the garbage collector once the Reader is unreachable (through
-// runtime.AddCleanup), not by Close, so a Lookup that overlaps Close or
-// follows it is still safe and keeps answering. Drop every reference to the
-// Reader to release its memory. Close is safe to call concurrently with
-// Lookup and more than once.
+// by the garbage collector once the Reader, and every Reader WithLanguage
+// made from it, is unreachable (through runtime.AddCleanup), not by Close,
+// so a Lookup that overlaps Close or follows it is still safe and keeps
+// answering. Drop every reference to the Reader to release its memory.
+// Close is safe to call concurrently with Lookup and more than once.
 func (r *Reader) Close() error { return nil }
 
 // Lookup resolves an IP address to a Record. ok is false when the address is
@@ -116,7 +139,12 @@ func (r *Reader) Lookup(ip netip.Addr) (rec Record, ok bool) {
 		}
 	}
 	if id != 0 {
-		rec, ok = r.decode(id), true
+		if r.alt {
+			rec = r.decodeAlt(id)
+		} else {
+			rec = r.decode(id)
+		}
+		ok = true
 	}
 	// The sections may live in a mapping that a cleanup releases once r is
 	// unreachable: keep r alive until the last read from them.

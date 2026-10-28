@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"math/bits"
 	"time"
 	"unsafe"
 
@@ -13,7 +14,7 @@ import (
 )
 
 // numSections is one more than the largest section id this reader knows.
-const numSections = format.SecV6ExcLo + 1
+const numSections = format.SecLangs + 1
 
 var sectionNames = [numSections]string{
 	format.SecMeta:     "META",
@@ -27,6 +28,9 @@ var sectionNames = [numSections]string{
 	format.SecV6IDs:    "V6IDS",
 	format.SecV6ExcIdx: "V6EXCIDX",
 	format.SecV6ExcLo:  "V6EXCLO",
+	format.SecXFields:  "XFIELDS",
+	format.SecXRecords: "XRECORDS",
+	format.SecLangs:    "LANGS",
 }
 
 // span locates a section in the input.
@@ -39,9 +43,15 @@ type span struct{ off, n int }
 type geo2 struct {
 	hdr  format.Header
 	sec  [numSections]span // indexed by section id; absent sections are empty
+	has  [numSections]bool // whether the directory lists the section
 	meta format.Meta
 
 	nStrings, nRecords, nV4, nV6, nExc int
+
+	// Revision 2.1: the XFIELDS bits and the layout of an XRECORDS entry
+	// for them and the LANGS count (1 without LANGS).
+	fields uint32
+	xl     format.XLayout
 }
 
 // corrupt returns an ErrCorrupt error with the message msg, formatted.
@@ -58,19 +68,19 @@ func corrupt(msg string, args ...any) error {
 //  4. the CRC-32C of every section (all directory entries, known or not)
 //     unless skipCRC is set;
 //  5. to 8. the contents, in checkStrings, checkRecords, checkIPv4 and
-//     checkIPv6.
+//     checkIPv6;
+//  9. to 12. the revision 2.1 sections XFIELDS, XRECORDS and LANGS, in
+//     checkExtensions; rule 13, the ASN records, is part of checkRecords.
 //
-// Errors wrap ErrUnsupportedVersion for a version other than 2 and
-// ErrCorrupt for everything else; the caller has matched the magic.
+// Errors wrap ErrUnsupportedVersion for a version other than 2 or an
+// unknown field set bit, and ErrCorrupt for everything else; the caller has
+// matched the magic.
 func parseGEO2(b []byte, skipCRC bool) (*geo2, error) {
 	h, err := format.ParseHeader(b)
 	if err != nil {
 		return nil, headerError(b, err)
 	}
 	g := &geo2{hdr: h}
-	if h.Profile == format.ProfileASN { // TODO(phase3): read ASN databases
-		return nil, fmt.Errorf("ip2geo: ASN databases are not supported yet: %w", ErrUnsupportedVersion)
-	}
 	if err := g.checkDirectory(b); err != nil {
 		return nil, err
 	}
@@ -98,6 +108,9 @@ func parseGEO2(b []byte, skipCRC bool) (*geo2, error) {
 		return nil, err
 	}
 	if err := g.checkIPv6(b); err != nil {
+		return nil, err
+	}
+	if err := g.checkExtensions(b); err != nil {
 		return nil, err
 	}
 	return g, nil
@@ -146,7 +159,6 @@ func (g *geo2) checkDirectory(b []byte) error {
 	if end > size {
 		return corrupt("directory of %d entries needs %d bytes, the input has %d", n, end, size)
 	}
-	var seen [numSections]bool
 	for k := range int(n) {
 		e := format.ParseDirEntry(b[format.HeaderSize+k*format.DirEntrySize:])
 		switch {
@@ -163,14 +175,14 @@ func (g *geo2) checkDirectory(b []byte) error {
 		if e.ID == 0 || e.ID >= numSections {
 			continue // unknown: a later minor revision's section
 		}
-		if seen[e.ID] {
+		if g.has[e.ID] {
 			return corrupt("section %s is listed twice", secName(e.ID))
 		}
-		seen[e.ID] = true
+		g.has[e.ID] = true
 		g.sec[e.ID] = span{int(e.Offset), int(e.Length)}
 	}
 	for id := format.SecMeta; id < format.SecV6ExcIdx; id++ {
-		if !seen[id] {
+		if !g.has[id] {
 			return corrupt("required section %s is missing", secName(id))
 		}
 	}
@@ -248,10 +260,10 @@ func (g *geo2) checkStrings(b []byte) error {
 	return nil
 }
 
-// checkRecords checks the record half of rule 5 and rule 6: at least one
-// record, record 0 all zero, every string id in a record below nStrings,
-// the minimal id width for nRecords, and every id in V4IDS and V6IDS below
-// nRecords.
+// checkRecords checks the record half of rule 5 and rule 6, and rule 13
+// for an ASN database: at least one record, record 0 all zero, every string
+// id in a record below nStrings, the minimal id width for nRecords, and
+// every id in V4IDS and V6IDS below nRecords.
 func (g *geo2) checkRecords(b []byte) error {
 	le := binary.LittleEndian
 	if g.nRecords == 0 {
@@ -264,19 +276,26 @@ func (g *geo2) checkRecords(b []byte) error {
 			return corrupt("record 0 is not all zero")
 		}
 	}
-	// The string fields of the profile: u16 ids, and the u24 city name.
-	offs := []int{format.RecCountryISO, format.RecCountryName, format.RecContinent}
-	if g.hdr.Profile >= uint8(ProfileRegion) {
-		offs = append(offs, format.RecRegionISO, format.RecRegionName)
-	}
-	if g.hdr.Profile >= uint8(ProfileCity) {
-		offs = append(offs, format.RecTimeZone)
+	// The string fields of the profile: u16 ids, and one u24 id, the city
+	// name or the ASN organization.
+	var offs []int
+	u24, u24Name := -1, ""
+	if p := Profile(g.hdr.Profile); p == ProfileASN {
+		u24, u24Name = format.RecASNOrg, "organization"
+	} else {
+		offs = []int{format.RecCountryISO, format.RecCountryName, format.RecContinent}
+		if p >= ProfileRegion {
+			offs = append(offs, format.RecRegionISO, format.RecRegionName)
+		}
+		if p == ProfileCity {
+			offs = append(offs, format.RecTimeZone)
+			u24, u24Name = format.RecCityName, "city name"
+		}
 	}
 	if g.nStrings > math.MaxUint16 {
 		offs = offs[:0] // every u16 id is below nStrings
 	}
 	ns := uint32(g.nStrings)
-	city := g.hdr.Profile >= uint8(ProfileCity)
 	for i := 1; i < g.nRecords; i++ {
 		r := recs[i*w : (i+1)*w]
 		for _, o := range offs {
@@ -284,9 +303,9 @@ func (g *geo2) checkRecords(b []byte) error {
 				return corrupt("record %d: string id %d at byte %d is not below the %d strings", i, id, o, ns)
 			}
 		}
-		if city {
-			if id := format.Uint24(r[format.RecCityName:]); id >= ns {
-				return corrupt("record %d: city name is string %d of %d", i, id, ns)
+		if u24 >= 0 {
+			if id := format.Uint24(r[u24:]); id >= ns {
+				return corrupt("record %d: %s is string %d of %d", i, u24Name, id, ns)
 			}
 		}
 	}
@@ -304,6 +323,170 @@ func (g *geo2) checkRecords(b []byte) error {
 		for i := range t.n {
 			if id := format.ReadID(ids, g.hdr.IDWidth, i); id >= nr {
 				return corrupt("%s range %d points at record %d of %d", t.name, i, id, nr)
+			}
+		}
+	}
+	return nil
+}
+
+// checkExtensions checks rules 9 to 12, in the order 10, 9, the LANGS
+// count, the XRECORDS length, the LANGS contents and the XRECORDS entries,
+// so that each count is bounded by its section before it is used. It
+// records the field set bits and the XRECORDS layout.
+func (g *geo2) checkExtensions(b []byte) error {
+	le := binary.LittleEndian
+	p := g.hdr.Profile
+	hasF, hasX, hasL := g.has[format.SecXFields], g.has[format.SecXRecords], g.has[format.SecLangs]
+	switch {
+	case p == format.ProfileASN && (hasF || hasX || hasL):
+		return corrupt("an ASN database has an XFIELDS, XRECORDS or LANGS section")
+	case hasF != hasX:
+		return corrupt("XFIELDS and XRECORDS must both be present or both absent")
+	case hasL && !hasF:
+		return corrupt("LANGS is present without XFIELDS and XRECORDS")
+	case !hasF:
+		g.xl = format.NewXLayout(p, 0, 1)
+		return nil
+	}
+
+	xf := g.bytes(b, format.SecXFields)
+	if len(xf) != format.XFieldsSize {
+		return corrupt("XFIELDS is %d bytes, want %d", len(xf), format.XFieldsSize)
+	}
+	fields := le.Uint32(xf)
+	if v := le.Uint32(xf[4:]); v != 0 {
+		return corrupt("XFIELDS reserved word is %#x, want 0", v)
+	}
+	if v := fields &^ format.KnownFields; v != 0 {
+		return fmt.Errorf("ip2geo: XFIELDS has field set bits %#x this reader does not know: %w", v, ErrUnsupportedVersion)
+	}
+	if !format.CheckFields(p, fields) {
+		return corrupt("field sets %#x are not allowed for the %s profile", fields, Profile(p))
+	}
+
+	langs := g.bytes(b, format.SecLangs)
+	nLangs := 1
+	if hasL {
+		if len(langs)%4 != 0 {
+			return corrupt("LANGS is %d bytes, not a multiple of 4", len(langs))
+		}
+		if nLangs = len(langs) / 4; nLangs < 2 {
+			return corrupt("LANGS lists %d languages, want at least 2", nLangs)
+		}
+	}
+
+	// The entry width, in uint64: nLangs is only bounded by the input so
+	// far. The width is below 2^34 and there are fewer than 2^28 records.
+	xr := g.bytes(b, format.SecXRecords)
+	base := format.NewXLayout(p, fields, 1)
+	w := uint64(base.Width) + uint64(nLangs-1)*3*uint64(len(base.Kinds))
+	if want := w * uint64(g.nRecords); uint64(len(xr)) != want {
+		return corrupt("XRECORDS is %d bytes, want %d for %d records of %d bytes", len(xr), want, g.nRecords, w)
+	}
+	// Now w <= len(xr), so the layout's int arithmetic cannot overflow.
+	g.fields, g.xl = fields, format.NewXLayout(p, fields, nLangs)
+
+	if hasL {
+		if err := g.checkLangs(b, langs); err != nil {
+			return err
+		}
+	}
+	return g.checkXRecords(xr)
+}
+
+// checkLangs checks rule 12 for a LANGS section of at least two entries:
+// every entry is the id of a non-empty string listed once, and the first
+// one is the META language.
+func (g *geo2) checkLangs(b, langs []byte) error {
+	le := binary.LittleEndian
+	seen := make(map[string]bool, len(langs)/4)
+	for j := range len(langs) / 4 {
+		id := le.Uint32(langs[j*4:])
+		if uint64(id) >= uint64(g.nStrings) {
+			return corrupt("LANGS[%d] is string %d of %d", j, id, g.nStrings)
+		}
+		s := string(g.str(b, id))
+		switch {
+		case s == "":
+			return corrupt("LANGS[%d] is the empty string", j)
+		case seen[s]:
+			return corrupt("LANGS[%d] %q is listed twice", j, s)
+		}
+		seen[s] = true
+	}
+	if l0, m := g.str(b, le.Uint32(langs)), g.str(b, g.meta.Language); !bytes.Equal(l0, m) {
+		return corrupt("LANGS[0] %q is not the META language %q", l0, m)
+	}
+	return nil
+}
+
+// str returns the bytes of string id, which must be below nStrings.
+func (g *geo2) str(b []byte, id uint32) []byte {
+	le := binary.LittleEndian
+	idx := g.bytes(b, format.SecStrIdx)
+	return g.bytes(b, format.SecStrBlob)[le.Uint32(idx[id*4:]):le.Uint32(idx[id*4+4:])]
+}
+
+// checkXRecords checks rule 11 past the length: entry 0 all zero, and in
+// the other entries every u24 string id below nStrings and no flag bit set
+// that the field set does not define.
+func (g *geo2) checkXRecords(xr []byte) error {
+	l := &g.xl
+	w := l.Width
+	if w == 0 {
+		return nil
+	}
+	for _, c := range xr[:w] {
+		if c != 0 {
+			return corrupt("XRECORDS entry 0 is not all zero")
+		}
+	}
+	// The u24 string ids: those of the blocks, then every name of the
+	// extra languages.
+	var offs []int
+	for _, f := range []struct {
+		set  uint32
+		offs []int
+	}{
+		{format.FieldContinent, []int{format.XContinentName}},
+		{format.FieldRegistered, []int{format.XRegisteredISO, format.XRegisteredName, format.XRepresentedISO, format.XRepresentedName, format.XRepresentedType}},
+		{format.FieldSubdivisions, []int{format.XRegion2ISO, format.XRegion2Name}},
+		{format.FieldPostal, []int{format.XPostal}},
+	} {
+		if g.fields&f.set != 0 {
+			for _, o := range f.offs {
+				offs = append(offs, l.Field[bits.TrailingZeros32(f.set)]+o)
+			}
+		}
+	}
+	for o := l.LangOff; o < w; o += 3 {
+		offs = append(offs, o)
+	}
+	// The flags bytes, with their defined bits.
+	type flagByte struct {
+		off  int
+		mask byte
+	}
+	var flags []flagByte
+	for b := range bits.Len32(format.KnownFields) {
+		if f := uint32(1) << b; g.fields&f != 0 {
+			if off, mask, ok := format.FlagByte(f); ok {
+				flags = append(flags, flagByte{l.Field[b] + off, mask})
+			}
+		}
+	}
+
+	ns := uint32(g.nStrings)
+	for i := 1; i < g.nRecords; i++ {
+		e := xr[i*w : (i+1)*w]
+		for _, o := range offs {
+			if id := format.Uint24(e[o:]); id >= ns {
+				return corrupt("XRECORDS entry %d: string id %d at byte %d is not below the %d strings", i, id, o, ns)
+			}
+		}
+		for _, f := range flags {
+			if c := e[f.off]; c&^f.mask != 0 {
+				return corrupt("XRECORDS entry %d: undefined flag bits %#x at byte %d", i, c&^f.mask, f.off)
 			}
 		}
 	}
@@ -397,6 +580,18 @@ func (g *geo2) reader(buf []byte) *Reader {
 		v6ids:    g.bytes(buf, format.SecV6IDs),
 		v6excIdx: g.bytes(buf, format.SecV6ExcIdx),
 		v6excLo:  g.bytes(buf, format.SecV6ExcLo),
+		fields:   FieldSet(g.fields),
+		xrecs:    g.bytes(buf, format.SecXRecords),
+		xl:       g.xl,
+		alt:      p == ProfileASN,
+	}
+	if langs := g.bytes(buf, format.SecLangs); len(langs) > 0 {
+		r.langs = make([]string, len(langs)/4)
+		for j := range r.langs {
+			r.langs[j] = r.strings[binary.LittleEndian.Uint32(langs[j*4:])]
+		}
+	} else if lang := r.strings[g.meta.Language]; lang != "" {
+		r.langs = []string{lang}
 	}
 	m := g.meta
 	r.meta = Metadata{
@@ -407,6 +602,7 @@ func (g *geo2) reader(buf []byte) *Reader {
 		SourceTime:      unixTime(m.SourceTime),
 		SourceType:      r.strings[m.SourceType],
 		Language:        r.strings[m.Language],
+		Fields:          r.fields,
 		Description:     r.strings[m.Description],
 		Builder:         r.strings[m.Builder],
 		Networks:        m.Networks,
