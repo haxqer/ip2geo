@@ -149,6 +149,35 @@ func TestRegisteredCountryOnly(t *testing.T) {
 			t.Logf("%d registered_country-only networks (first %s), %d addresses, %d mismatches",
 				len(info.regOnly), info.regOnly[0], c.addrs, c.mismatch)
 			c.done()
+
+			// With FieldRegistered the same networks carry their registered
+			// country, equal to the source's.
+			reg, err := mmdb.Open(src, mmdb.Options{Profile: p, Lang: info.lang, Fields: ip2geo.FieldRegistered})
+			if err != nil {
+				t.Fatal(err)
+			}
+			bad := 0
+			for _, a := range addrs {
+				var s struct {
+					RC struct {
+						ISOCode   string            `maxminddb:"iso_code"`
+						GeoNameID uint32            `maxminddb:"geoname_id"`
+						EU        bool              `maxminddb:"is_in_european_union"`
+						Names     map[string]string `maxminddb:"names"`
+					} `maxminddb:"registered_country"`
+				}
+				if err := mm.Lookup(a).Decode(&s); err != nil {
+					t.Fatal(err)
+				}
+				want := ip2geo.Country{ISO: s.RC.ISOCode, Name: s.RC.Names[info.lang], GeoNameID: s.RC.GeoNameID, IsInEuropeanUnion: s.RC.EU}
+				d, ok := reg.LookupDetails(a)
+				if !ok || d.RegisteredCountry != want {
+					if bad++; bad <= maxReported {
+						t.Errorf("%s: ok=%v registered_country %+v, want %+v", a, ok, d.RegisteredCountry, want)
+					}
+				}
+			}
+			t.Logf("FieldRegistered: %d addresses, %d registered_country mismatches", len(addrs), bad)
 		})
 	}
 }

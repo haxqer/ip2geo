@@ -145,6 +145,17 @@ func TestExtMatchesSource(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The same file through the real reader, one view per language.
+	db, err := ip2geo.Open(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	views := make([]*ip2geo.Reader, len(langs))
+	for j, l := range langs {
+		if views[j], err = db.WithLanguage(l); err != nil {
+			t.Fatal(err)
+		}
+	}
 	r := rand.New(rand.NewSource(2))
 	sets := []addrSet{
 		{"ipv4-random", randomAddrs(r, allIPv4, nRandomV4/4)},
@@ -165,8 +176,12 @@ func TestExtMatchesSource(t *testing.T) {
 				if !res.Found() {
 					want = ip2geo.Details{}
 				}
-				if ok == res.Found() && got == want {
+				read, readOK := views[j].LookupDetails(a)
+				if ok == res.Found() && got == want && readOK == res.Found() && read == want {
 					continue
+				}
+				if got == want {
+					got, ok = read, readOK // the parser agrees: report the reader
 				}
 				if bad++; bad <= maxReported {
 					t.Errorf("%s %s in %s (maxminddb network %s):\n  maxminddb found=%v %+v\n  parsed    ok=%v    %+v",
