@@ -2,8 +2,10 @@ package mmdb_test
 
 // An independent GEO2 parser for the builder tests, written from
 // docs/FORMAT.md alone. It shares no code with the builder's writer and
-// takes from internal/format only the record field offsets (format.Rec*),
-// so a writer bug is not hidden by the same bug in a shared helper.
+// takes from internal/format only the geo record field offsets
+// (format.Rec*), so a writer bug is not hidden by the same bug in a shared
+// helper. The revision 2.1 parts (XFIELDS, XRECORDS, LANGS and ASN
+// records) are decoded from the spec's tables, written out again below.
 //
 // parseGEO2 checks every rule a conforming reader checks (FORMAT.md, "Reader
 // requirements") and, on top, the choices the spec leaves to the writer and
@@ -22,6 +24,7 @@ import (
 	"hash/crc32"
 	"math"
 	"net/netip"
+	"slices"
 	"sort"
 	"unicode/utf8"
 
@@ -42,12 +45,16 @@ const (
 	gsV6IDs    = 9
 	gsV6ExcIdx = 10
 	gsV6ExcLo  = 11
+	gsXFields  = 12
+	gsXRecords = 13
+	gsLangs    = 14
 )
 
 var geo2SectionNames = map[uint32]string{
 	gsMeta: "META", gsStrIdx: "STRIDX", gsStrBlob: "STRBLOB", gsRecords: "RECORDS",
 	gsV4Idx: "V4IDX", gsV4Starts: "V4STARTS", gsV4IDs: "V4IDS", gsV6Starts: "V6STARTS",
 	gsV6IDs: "V6IDS", gsV6ExcIdx: "V6EXCIDX", gsV6ExcLo: "V6EXCLO",
+	gsXFields: "XFIELDS", gsXRecords: "XRECORDS", gsLangs: "LANGS",
 }
 
 var castagnoli = crc32.MakeTable(crc32.Castagnoli)
@@ -71,6 +78,7 @@ type geo2Rec struct {
 	countryGeo, cityGeo                                                     uint32
 	lat, lon                                                                int32
 	acc                                                                     uint16
+	asn, org                                                                uint32 // ASN profile
 }
 
 // geo2File is a parsed GEO2 file.
@@ -92,6 +100,15 @@ type geo2File struct {
 	recWidth int
 	recs     []geo2Rec
 
+	// Revision 2.1: the XFIELDS bits, the XRECORDS entries (nil without
+	// XRECORDS), the name kinds each extra language stores, and the
+	// languages (nil without LANGS).
+	xfields uint32
+	xWidth  int
+	x       []geo2X
+	kinds   []int
+	langs   []string
+
 	v4idx   []uint32
 	v4low   []uint16
 	v4start []uint32 // absolute starts
@@ -104,6 +121,7 @@ type geo2File struct {
 }
 
 func le16(b []byte) uint16 { return binary.LittleEndian.Uint16(b) }
+func le24(b []byte) uint32 { return uint32(b[0]) | uint32(b[1])<<8 | uint32(b[2])<<16 }
 func le32(b []byte) uint32 { return binary.LittleEndian.Uint32(b) }
 func le64(b []byte) uint64 { return binary.LittleEndian.Uint64(b) }
 
@@ -140,7 +158,7 @@ func parseGEO2(b []byte) (*geo2File, error) {
 	if string(b[:4]) != "GEO2" || b[4] != 2 {
 		return nil, fmt.Errorf("magic %q version %d, want GEO2 2", b[:4], b[4])
 	}
-	if b[5] > 2 || b[6] > 7 || b[7] < 1 || b[7] > 4 {
+	if b[5] > 3 || b[6] > 7 || b[7] < 1 || b[7] > 4 {
 		return nil, fmt.Errorf("header profile %d latScale %d idWidth %d", b[5], b[6], b[7])
 	}
 	f.profile, f.latScale, f.idWidth = ip2geo.Profile(b[5]), b[6], b[7]
@@ -204,6 +222,9 @@ func parseGEO2(b []byte) (*geo2File, error) {
 	// Section lengths.
 	sec := f.sec
 	f.recWidth = format.RecordWidth(uint8(f.profile))
+	if f.profile == ip2geo.ProfileASN {
+		f.recWidth = asnRecWidth
+	}
 	switch {
 	case len(sec[gsMeta]) != 64:
 		return nil, fmt.Errorf("META is %d bytes, want 64", len(sec[gsMeta]))
@@ -230,6 +251,12 @@ func parseGEO2(b []byte) (*geo2File, error) {
 		return nil, err
 	}
 	if err := f.parseMeta(); err != nil {
+		return nil, err
+	}
+	if err := f.parseExt(); err != nil {
+		return nil, err
+	}
+	if err := f.checkRecordsDistinct(); err != nil {
 		return nil, err
 	}
 	if err := f.checkStringUse(); err != nil {
@@ -288,9 +315,9 @@ func (f *geo2File) parseStrings() error {
 	return nil
 }
 
-// parseRecords decodes RECORDS at the format.Rec* offsets and checks
-// record 0, the string ids, the id width and that the records are distinct
-// (builder rule; record 0 and the all-empty record may both be zero).
+// parseRecords decodes RECORDS at the format.Rec* offsets (an ASN record:
+// u32 number @0, u24 organization @4) and checks record 0, the string ids
+// and the id width.
 func (f *geo2File) parseRecords() error {
 	raw := f.sec[gsRecords]
 	n := len(raw) / f.recWidth
@@ -300,11 +327,17 @@ func (f *geo2File) parseRecords() error {
 	if want := minIDWidth(n); f.idWidth != want {
 		return fmt.Errorf("idWidth %d for %d records, want %d", f.idWidth, n, want)
 	}
-	seen := make(map[string]int, n)
 	f.recs = make([]geo2Rec, n)
 	for i := range n {
 		b := raw[i*f.recWidth : (i+1)*f.recWidth]
 		r := &f.recs[i]
+		if f.profile == ip2geo.ProfileASN {
+			r.asn, r.org = le32(b), le24(b[4:])
+			if int(r.org) >= len(f.strs) {
+				return fmt.Errorf("record %d: organization string id %d, only %d strings", i, r.org, len(f.strs))
+			}
+			continue
+		}
 		r.countryISO = uint32(le16(b[format.RecCountryISO:]))
 		r.countryName = uint32(le16(b[format.RecCountryName:]))
 		r.continent = uint32(le16(b[format.RecContinent:]))
@@ -314,8 +347,7 @@ func (f *geo2File) parseRecords() error {
 			r.regionName = uint32(le16(b[format.RecRegionName:]))
 		}
 		if f.profile >= ip2geo.ProfileCity {
-			c := b[format.RecCityName:]
-			r.cityName = uint32(c[0]) | uint32(c[1])<<8 | uint32(c[2])<<16
+			r.cityName = le24(b[format.RecCityName:])
 			r.cityGeo = le32(b[format.RecCityGeo:])
 			r.lat = int32(le32(b[format.RecLat:]))
 			r.lon = int32(le32(b[format.RecLon:]))
@@ -327,12 +359,26 @@ func (f *geo2File) parseRecords() error {
 				return fmt.Errorf("record %d: string id %d, only %d strings", i, id, len(f.strs))
 			}
 		}
-		if i > 0 {
-			if j, dup := seen[string(b)]; dup {
-				return fmt.Errorf("records %d and %d are equal", j, i)
-			}
-			seen[string(b)] = i
+	}
+	return nil
+}
+
+// checkRecordsDistinct checks that the records are distinct (builder rule;
+// record 0 and the all-empty record may both be zero). With XRECORDS a
+// record is its RECORDS entry and its XRECORDS entry together, so RECORDS
+// alone may repeat.
+func (f *geo2File) checkRecordsDistinct() error {
+	raw, xraw := f.sec[gsRecords], f.sec[gsXRecords]
+	seen := make(map[string]int, len(f.recs))
+	for i := 1; i < len(f.recs); i++ {
+		k := string(raw[i*f.recWidth:(i+1)*f.recWidth]) + "|"
+		if f.x != nil {
+			k += string(xraw[i*f.xWidth : (i+1)*f.xWidth])
 		}
+		if j, dup := seen[k]; dup {
+			return fmt.Errorf("records %d and %d are equal", j, i)
+		}
+		seen[k] = i
 	}
 	return nil
 }
@@ -368,6 +414,15 @@ func (f *geo2File) checkStringUse() error {
 			used16[id], used[id] = true, true
 		}
 		used[r.cityName] = true
+		used[r.org] = true
+	}
+	for i := range f.x {
+		for _, id := range f.x[i].strings() {
+			used[id] = true
+		}
+	}
+	for _, l := range f.langs {
+		used[slices.Index(f.strs, l)] = true // strings are distinct
 	}
 	m := f.sec[gsMeta]
 	for _, off := range []int{24, 28, 32, 36} {
@@ -595,4 +650,282 @@ func (f *geo2File) v6Boundaries() string {
 		fmt.Fprintf(&buf, "%s=%d", netip.AddrFrom16(a), f.v6id[i])
 	}
 	return buf.String()
+}
+
+// Revision 2.1, from the spec's tables.
+
+// asnRecWidth is the width of a profile 3 (ASN) record.
+const asnRecWidth = 7
+
+// xSetWidth[b] is the block width of field set bit b.
+var xSetWidth = [8]int{1, 7, 24, 14, 3, 2, 1, 1}
+
+// Name kinds, in the spec's order.
+const (
+	kCountry = iota
+	kRegion
+	kCity
+	kContinent
+	kRegion2
+	kRegistered
+	kRepresented
+)
+
+// xAllowed reports whether field set bits are allowed for a profile:
+// "every set except subdivisions, postal, metro and location for country;
+// every set except postal, metro and location for region; all for city;
+// none for ASN".
+func xAllowed(profile ip2geo.Profile, bits uint32) bool {
+	const subdivisions, postal, metro, location = 1 << 3, 1 << 4, 1 << 5, 1 << 7
+	switch profile {
+	case ip2geo.ProfileCountry:
+		return bits&(subdivisions|postal|metro|location) == 0
+	case ip2geo.ProfileRegion:
+		return bits&(postal|metro|location) == 0
+	case ip2geo.ProfileCity:
+		return true
+	}
+	return bits == 0
+}
+
+// geo2X is a decoded XRECORDS entry with its raw string ids.
+type geo2X struct {
+	eu                                  bool
+	contName, contGeo                   uint32
+	regISO, regName, regGeo             uint32
+	repISO, repName, repGeo, repType    uint32
+	regEU, repEU                        bool
+	sub1Geo, sub2ISO, sub2Name, sub2Geo uint32
+	postal                              uint32
+	metro                               uint16
+	anycast, anonymousProxy, satellite  bool
+	hasCoordinates, hasAccuracy         bool
+	names                               [][]uint32 // names[j-1][i]: extra language j, kind kinds[i]
+}
+
+// strings returns the entry's string ids.
+func (x *geo2X) strings() []uint32 {
+	ids := []uint32{x.contName, x.regISO, x.regName, x.repISO, x.repName, x.repType, x.sub2ISO, x.sub2Name, x.postal}
+	for _, n := range x.names {
+		ids = append(ids, n...)
+	}
+	return ids
+}
+
+// parseExt checks and decodes XFIELDS, XRECORDS and LANGS (spec rules
+// 9-12) and the builder's rule that they are present only when needed.
+func (f *geo2File) parseExt() error {
+	xf, hasXF := f.sec[gsXFields]
+	xr, hasXR := f.sec[gsXRecords]
+	lg, hasLangs := f.sec[gsLangs]
+	switch {
+	case hasXF != hasXR:
+		return errors.New("only one of XFIELDS and XRECORDS is present")
+	case hasLangs && !hasXF:
+		return errors.New("LANGS without XFIELDS and XRECORDS")
+	case f.profile == ip2geo.ProfileASN && (hasXF || hasLangs):
+		return errors.New("an ASN file with extension sections")
+	case !hasXF:
+		return nil
+	case len(xf) != 8 || le32(xf[4:]) != 0:
+		return fmt.Errorf("XFIELDS is %d bytes %x, want 8 with a zero reserved word", len(xf), xf)
+	}
+	f.xfields = le32(xf)
+	if f.xfields > 0xff || !xAllowed(f.profile, f.xfields) {
+		return fmt.Errorf("XFIELDS bits %#x not allowed for profile %v", f.xfields, f.profile)
+	}
+
+	nLangs := 1
+	if hasLangs {
+		if len(lg)%4 != 0 || len(lg) < 8 {
+			return fmt.Errorf("LANGS is %d bytes, want at least 2 u32", len(lg))
+		}
+		nLangs = len(lg) / 4
+		for i := range nLangs {
+			id := le32(lg[4*i:])
+			switch {
+			case int(id) >= len(f.strs):
+				return fmt.Errorf("LANGS[%d] = %d, only %d strings", i, id, len(f.strs))
+			case f.strs[id] == "" || slices.Contains(f.langs, f.strs[id]):
+				return fmt.Errorf("LANGS[%d] = %q is empty or repeated", i, f.strs[id])
+			}
+			f.langs = append(f.langs, f.strs[id])
+		}
+		if f.langs[0] != f.meta.language {
+			return fmt.Errorf("LANGS[0] = %q, META.language = %q", f.langs[0], f.meta.language)
+		}
+	}
+	if f.xfields == 0 && !hasLangs {
+		return errors.New("XFIELDS and XRECORDS without field sets or LANGS (the builder omits them)")
+	}
+
+	// The blocks of the sets present, in bit order, then the names.
+	var off [8]int
+	for b := range 8 {
+		off[b] = -1
+		if f.xfields&(1<<b) != 0 {
+			off[b] = f.xWidth
+			f.xWidth += xSetWidth[b]
+		}
+	}
+	blocks := f.xWidth
+	f.kinds = []int{kCountry}
+	if f.profile >= ip2geo.ProfileRegion {
+		f.kinds = append(f.kinds, kRegion)
+	}
+	if f.profile >= ip2geo.ProfileCity {
+		f.kinds = append(f.kinds, kCity)
+	}
+	if off[1] >= 0 {
+		f.kinds = append(f.kinds, kContinent)
+	}
+	if off[3] >= 0 {
+		f.kinds = append(f.kinds, kRegion2)
+	}
+	if off[2] >= 0 {
+		f.kinds = append(f.kinds, kRegistered, kRepresented)
+	}
+	f.xWidth += (nLangs - 1) * 3 * len(f.kinds)
+	if len(xr) != len(f.recs)*f.xWidth {
+		return fmt.Errorf("XRECORDS is %d bytes, want %d records × %d", len(xr), len(f.recs), f.xWidth)
+	}
+	if !allZero(xr[:f.xWidth]) {
+		return errors.New("XRECORDS entry 0 is not all zero")
+	}
+
+	f.x = make([]geo2X, len(f.recs))
+	for i := range f.x {
+		e := xr[i*f.xWidth : (i+1)*f.xWidth]
+		x := &f.x[i]
+		flags := func(b, at int, mask byte) (byte, error) {
+			v := e[off[b]+at]
+			if v&^mask != 0 {
+				return 0, fmt.Errorf("XRECORDS entry %d: field set %d flags %#x has undefined bits", i, b, v)
+			}
+			return v, nil
+		}
+		if o := off[0]; o >= 0 {
+			v, err := flags(0, 0, 1)
+			if err != nil {
+				return err
+			}
+			x.eu = v&1 != 0
+		}
+		if o := off[1]; o >= 0 {
+			x.contName, x.contGeo = le24(e[o:]), le32(e[o+3:])
+		}
+		if o := off[2]; o >= 0 {
+			x.regISO, x.regName, x.regGeo = le24(e[o:]), le24(e[o+3:]), le32(e[o+6:])
+			x.repISO, x.repName, x.repGeo, x.repType = le24(e[o+10:]), le24(e[o+13:]), le32(e[o+16:]), le24(e[o+20:])
+			v, err := flags(2, 23, 3)
+			if err != nil {
+				return err
+			}
+			x.regEU, x.repEU = v&1 != 0, v&2 != 0
+		}
+		if o := off[3]; o >= 0 {
+			x.sub1Geo, x.sub2ISO, x.sub2Name, x.sub2Geo = le32(e[o:]), le24(e[o+4:]), le24(e[o+7:]), le32(e[o+10:])
+		}
+		if o := off[4]; o >= 0 {
+			x.postal = le24(e[o:])
+		}
+		if o := off[5]; o >= 0 {
+			x.metro = le16(e[o:])
+		}
+		if o := off[6]; o >= 0 {
+			v, err := flags(6, 0, 7)
+			if err != nil {
+				return err
+			}
+			x.anycast, x.anonymousProxy, x.satellite = v&1 != 0, v&2 != 0, v&4 != 0
+		}
+		if o := off[7]; o >= 0 {
+			v, err := flags(7, 0, 3)
+			if err != nil {
+				return err
+			}
+			x.hasCoordinates, x.hasAccuracy = v&1 != 0, v&2 != 0
+		}
+		for j := 1; j < nLangs; j++ {
+			ids := make([]uint32, len(f.kinds))
+			for k := range ids {
+				ids[k] = le24(e[blocks+(j-1)*3*len(f.kinds)+3*k:])
+			}
+			x.names = append(x.names, ids)
+		}
+		for _, id := range x.strings() {
+			if int(id) >= len(f.strs) {
+				return fmt.Errorf("XRECORDS entry %d: string id %d, only %d strings", i, id, len(f.strs))
+			}
+		}
+	}
+	return nil
+}
+
+// details returns record id as LookupDetails would, with the names in
+// language j of LANGS (0 is the primary language): a name missing in
+// language j is the primary one.
+func (f *geo2File) details(id uint32, j int) ip2geo.Details {
+	if f.profile == ip2geo.ProfileASN {
+		r := f.recs[id]
+		return ip2geo.Details{ASN: ip2geo.ASN{Number: r.asn, Organization: f.strs[r.org]}}
+	}
+	d := ip2geo.Details{Record: f.record(id)}
+	if f.x == nil {
+		return d
+	}
+	x := &f.x[id]
+	name := func(primary uint32, kind int) string {
+		if j > 0 {
+			if k := slices.Index(f.kinds, kind); k >= 0 && x.names[j-1][k] != 0 {
+				return f.strs[x.names[j-1][k]]
+			}
+		}
+		return f.strs[primary]
+	}
+	r := f.recs[id]
+	d.CountryName = name(r.countryName, kCountry)
+	d.RegionName = name(r.regionName, kRegion)
+	d.City = name(r.cityName, kCity)
+	has := func(b int) bool { return f.xfields&(1<<b) != 0 }
+	if has(0) {
+		d.IsInEuropeanUnion = x.eu
+	}
+	if has(1) {
+		d.ContinentName, d.ContinentGeoNameID = name(x.contName, kContinent), x.contGeo
+	}
+	if has(2) {
+		d.RegisteredCountry = ip2geo.Country{ISO: f.strs[x.regISO], Name: name(x.regName, kRegistered),
+			GeoNameID: x.regGeo, IsInEuropeanUnion: x.regEU}
+		d.RepresentedCountry = ip2geo.Country{ISO: f.strs[x.repISO], Name: name(x.repName, kRepresented),
+			GeoNameID: x.repGeo, IsInEuropeanUnion: x.repEU}
+		d.RepresentedCountryType = f.strs[x.repType]
+	}
+	if has(3) {
+		d.RegionGeoNameID = x.sub1Geo
+		d.Region2ISO, d.Region2Name, d.Region2GeoNameID = f.strs[x.sub2ISO], name(x.sub2Name, kRegion2), x.sub2Geo
+	}
+	if has(4) {
+		d.PostalCode = f.strs[x.postal]
+	}
+	if has(5) {
+		d.MetroCode = x.metro
+	}
+	if has(6) {
+		d.IsAnycast, d.IsAnonymousProxy, d.IsSatelliteProvider = x.anycast, x.anonymousProxy, x.satellite
+	}
+	if has(7) {
+		d.HasCoordinates, d.HasAccuracyRadius = x.hasCoordinates, x.hasAccuracy
+	}
+	return d
+}
+
+// lookupDetails is Reader.LookupDetails on the parsed file, with the names
+// in language j of LANGS.
+func (f *geo2File) lookupDetails(ip netip.Addr, j int) (ip2geo.Details, bool) {
+	id := f.lookupID(ip)
+	if id == 0 {
+		return ip2geo.Details{}, false
+	}
+	return f.details(id, j), true
 }

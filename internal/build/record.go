@@ -92,7 +92,8 @@ func name(names []string, j int) string {
 	return ""
 }
 
-// recKey is a record: its string ids and its other fields. A ProfileASN
+// recKey is a record: its string ids and its other fields, and the id of
+// its extension entry (see xTable), 0 when the build has none. A ProfileASN
 // record keeps the AS number in countryGeo and the organization in
 // cityName, the base fields with the same width.
 type recKey struct {
@@ -100,6 +101,7 @@ type recKey struct {
 	countryGeo, cityGeo                                                     uint32
 	lat, lon                                                                int32
 	acc                                                                     uint16
+	ext                                                                     uint32
 }
 
 // key returns the record key of r for profile p, with provisional string

@@ -50,6 +50,24 @@ func encode(opts *Options, br *buildResult) ([]byte, error) {
 			section{format.SecV6ExcIdx, 4 * nExc, func(b []byte) []byte { return appendExcIdx(b, &br.v6b) }},
 			section{format.SecV6ExcLo, 8 * nExc, func(b []byte) []byte { return appendExcLo(b, &br.v6b) }})
 	}
+	if x := br.x; x != nil {
+		secs = append(secs,
+			section{format.SecXFields, format.XFieldsSize, func(b []byte) []byte {
+				b = binary.LittleEndian.AppendUint32(b, x.fields)
+				return binary.LittleEndian.AppendUint32(b, 0)
+			}},
+			section{format.SecXRecords, uint64(br.recs.n) * uint64(x.layout.Width), func(b []byte) []byte {
+				return appendXRecords(b, x, &br.recs, br.remap)
+			}})
+	}
+	if len(br.langs) > 0 {
+		secs = append(secs, section{format.SecLangs, 4 * uint64(len(br.langs)), func(b []byte) []byte {
+			for _, id := range br.langs {
+				b = binary.LittleEndian.AppendUint32(b, id)
+			}
+			return b
+		}})
+	}
 
 	// Lay the sections out after the directory.
 	dirEnd := uint64(format.HeaderSize + len(secs)*format.DirEntrySize)
@@ -133,6 +151,17 @@ func appendRecords(b []byte, p ip2geo.Profile, width int, recs *blockList[recKey
 		for i := range blk {
 			packRecord(&rec, p, &blk[i])
 			b = append(b, rec[:width]...)
+		}
+	}
+	return b
+}
+
+// appendXRecords appends the XRECORDS entry of every record, in record
+// order, with final string ids.
+func appendXRecords(b []byte, x *xTable, recs *blockList[recKey], remap []uint32) []byte {
+	for _, blk := range recs.blocks {
+		for i := range blk {
+			b = x.appendEntry(b, blk[i].ext, remap)
 		}
 	}
 	return b

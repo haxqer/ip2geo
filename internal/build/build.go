@@ -29,6 +29,13 @@
 // in the order Record first sees them, so the same input in the same order
 // gives a byte-identical file.
 //
+// Options.Fields and a second language add the XFIELDS, XRECORDS and LANGS
+// sections of format revision 2.1; source records that differ only in
+// their extension fields or in an extra language's names become distinct
+// records. Without either, the file is a revision 2.0 file, byte for byte
+// what the builder wrote before revision 2.1. A ProfileASN build keeps
+// Record.ASN and nothing else.
+//
 // Errors are returned without a package prefix; a frontend wraps them in
 // its own ("mmdb: ...").
 package build
@@ -218,6 +225,10 @@ type Builder struct {
 	// non-zero id, so the reader reports its networks as found.
 	keys map[recKey]uint32
 	recs blockList[recKey]
+	// x holds the extension entries, nil when the build has none; langs
+	// are the provisional string ids of the LANGS section.
+	x     *xTable
+	langs []uint32
 
 	v4       merger4
 	v6       merger6
@@ -248,6 +259,12 @@ func New(opts Options, src Source) (*Builder, error) {
 		Description: b.strs.id(opts.Description),
 		Builder:     b.strs.id(BuilderName()),
 	}
+	if len(opts.Languages) > 1 {
+		for _, l := range opts.Languages {
+			b.langs = append(b.langs, b.strs.id(l))
+		}
+	}
+	b.x = newXTable(uint8(opts.Profile), uint32(opts.Fields), len(opts.Languages))
 	b.recs.push(recKey{})
 	return b, nil
 }
@@ -261,6 +278,9 @@ func (b *Builder) Options() *Options { return &b.opts }
 func (b *Builder) Record(r *Record) uint32 {
 	b.distinct++
 	k := r.key(b.opts.Profile, b.scale, b.strs)
+	if b.x != nil {
+		k.ext = b.x.add(r, b.strs)
+	}
 	id, ok := b.keys[k]
 	if !ok {
 		id = uint32(b.recs.n)
@@ -319,6 +339,13 @@ type buildResult struct {
 	v4b  blockList[boundary4]
 	v6b  blockList[boundary6]
 	meta format.Meta
+
+	// x is the extension table, nil without one; its entries still hold
+	// provisional string ids, which remap renumbers. langs are the final
+	// string ids of LANGS, nil with one language.
+	x     *xTable
+	remap []uint32
+	langs []uint32
 }
 
 // Finish checks the string table, renumbers the strings so that those of
@@ -346,7 +373,15 @@ func (b *Builder) Finish() ([]byte, Stats, error) {
 	meta.Networks = uint64(b.networks)
 	meta.DistinctRecords = uint32(b.distinct)
 
-	br := &buildResult{strs: list, recs: b.recs, v4b: b.v4.finish(), v6b: b.v6.finish(), meta: meta}
+	for i, id := range b.langs {
+		b.langs[i] = remap[id]
+	}
+	if b.x != nil {
+		b.x.ids = nil // the entries are all encode needs
+	}
+
+	br := &buildResult{strs: list, recs: b.recs, v4b: b.v4.finish(), v6b: b.v6.finish(), meta: meta,
+		x: b.x, remap: remap, langs: b.langs}
 	buf, err := encode(&b.opts, br)
 	if err != nil {
 		return nil, Stats{}, err
