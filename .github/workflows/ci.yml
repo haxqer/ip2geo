@@ -130,10 +130,11 @@ jobs:
           go-version-input: stable
           go-package: ./...
 
-  # Runs the mmdb integration tests against DB-IP IP-to-City Lite (CC BY 4.0).
-  # The database is only used as test input: nothing built here is uploaded or
-  # published, so the attribution requirement does not come into play. The
-  # monthly data.yml workflow is the only place that publishes derived files.
+  # Runs the mmdb and CLI integration tests against DB-IP IP-to-City Lite and
+  # IP-to-ASN Lite (CC BY 4.0). The databases are only used as test input:
+  # nothing built here is uploaded or published, so the attribution
+  # requirement does not come into play. The monthly data.yml workflow is the
+  # only place that publishes derived files.
   integration:
     name: integration (DB-IP Lite)
     runs-on: ubuntu-latest
@@ -149,21 +150,27 @@ jobs:
           cache: true
 
       # DB-IP publishes the new month early in the month; until then the
-      # current month's file is a 404, so fall back to the previous month.
+      # current month's files are a 404, so fall back to the previous month.
+      # City and ASN must come from the same month, so both are probed.
       - name: Pick DB-IP Lite month
         id: dbip
         run: |
           month="$(date -u +%Y-%m)"
-          url="https://download.db-ip.com/free/dbip-city-lite-${month}.mmdb.gz"
-          if ! curl -fsSIL --retry 2 -o /dev/null "$url"; then
-            prev="$(date -u -d "$(date -u +%Y-%m-01) -1 month" +%Y-%m)"
-            echo "::notice::${url} is not available yet; using ${prev}"
-            month="$prev"
-          fi
+          for edition in city asn; do
+            url="https://download.db-ip.com/free/dbip-${edition}-lite-${month}.mmdb.gz"
+            if ! curl -fsSIL --retry 2 -o /dev/null "$url"; then
+              prev="$(date -u -d "$(date -u +%Y-%m-01) -1 month" +%Y-%m)"
+              echo "::notice::${url} is not available yet; using ${prev}"
+              month="$prev"
+              break
+            fi
+          done
           {
             echo "month=${month}"
             echo "dir=${RUNNER_TEMP}/dbip"
             echo "gz=${RUNNER_TEMP}/dbip/dbip-city-lite-${month}.mmdb.gz"
+            echo "asn-dir=${RUNNER_TEMP}/dbip-asn"
+            echo "asn-gz=${RUNNER_TEMP}/dbip-asn/dbip-asn-lite-${month}.mmdb.gz"
           } >> "$GITHUB_OUTPUT"
 
       # restore/save are split so the download is cached even when the tests
@@ -195,21 +202,67 @@ jobs:
           path: ${{ steps.dbip.outputs.dir }}
           key: ${{ steps.cache.outputs.cache-primary-key }}
 
+      # ASN Lite has its own cache entry rather than sharing the City one:
+      # bench.yml saves the City entry with the same key and without ASN, so
+      # a shared entry could be restored without the ASN file in it.
+      - name: Restore DB-IP ASN Lite from cache
+        id: cache-asn
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ steps.dbip.outputs.asn-dir }}
+          key: dbip-asn-lite-${{ steps.dbip.outputs.month }}
+
+      - name: Download DB-IP ASN Lite
+        if: steps.cache-asn.outputs.cache-hit != 'true'
+        env:
+          MONTH: ${{ steps.dbip.outputs.month }}
+          DIR: ${{ steps.dbip.outputs.asn-dir }}
+          GZ: ${{ steps.dbip.outputs.asn-gz }}
+        run: |
+          mkdir -p "$DIR"
+          curl -fsSL --retry 3 --retry-delay 5 -o "$GZ" \
+            "https://download.db-ip.com/free/dbip-asn-lite-${MONTH}.mmdb.gz"
+          gzip -t "$GZ"
+          ls -l "$GZ"
+
+      - name: Save DB-IP ASN Lite to cache
+        if: steps.cache-asn.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ steps.dbip.outputs.asn-dir }}
+          key: ${{ steps.cache-asn.outputs.cache-primary-key }}
+
       - name: Decompress
         env:
           GZ: ${{ steps.dbip.outputs.gz }}
-        run: gunzip -c "$GZ" > "${RUNNER_TEMP}/dbip-city-lite.mmdb"
+          ASN_GZ: ${{ steps.dbip.outputs.asn-gz }}
+        run: |
+          gunzip -c "$GZ" > "${RUNNER_TEMP}/dbip-city-lite.mmdb"
+          gunzip -c "$ASN_GZ" > "${RUNNER_TEMP}/dbip-asn-lite.mmdb"
 
       # No -race: the race detector inflates the ~26 s City build so much that
       # the two tests took 743 s, past go test's 600 s default timeout. The
       # race detector stays on the hermetic tests in the test job. -count=1
       # keeps a cached result from standing in for a real run.
+      # TestExtMatchesSource checks every field set in three languages and
+      # TestASNMatchesSource the ASN profile, both against maxminddb.
       - name: Integration tests
         env:
           IP2GEO_TEST_MMDB: ${{ runner.temp }}/dbip-city-lite.mmdb
+          IP2GEO_TEST_ASN_MMDB: ${{ runner.temp }}/dbip-asn-lite.mmdb
         run: |
           test -s "$IP2GEO_TEST_MMDB"
-          go test -v -count=1 -timeout 30m -run 'TestBuildMatchesSource|TestOpenInMemory|TestRegisteredCountryOnly' ./mmdb/
+          test -s "$IP2GEO_TEST_ASN_MMDB"
+          go test -v -count=1 -timeout 30m \
+            -run 'TestBuildMatchesSource|TestOpenInMemory|TestRegisteredCountryOnly|TestExtMatchesSource|TestASNMatchesSource' ./mmdb/
+
+      # build, info and lookup through the CLI on both sources: -fields all
+      # with two languages on City, -profile asn on ASN. No -race, as above.
+      - name: CLI integration test
+        env:
+          IP2GEO_TEST_MMDB: ${{ runner.temp }}/dbip-city-lite.mmdb
+          IP2GEO_TEST_ASN_MMDB: ${{ runner.temp }}/dbip-asn-lite.mmdb
+        run: go test -v -count=1 -timeout 15m -run 'TestBuildCommand' ./cmd/ip2geo/
 
       # Lookup ns/op and allocs/op per profile for IPv4 and IPv6 on the same
       # database. No -race. Shared runners are noisy, so the numbers are for
@@ -218,3 +271,49 @@ jobs:
         env:
           IP2GEO_TEST_MMDB: ${{ runner.temp }}/dbip-city-lite.mmdb
         run: go test -run '^$' -bench BenchmarkLookup -benchtime=2s ./mmdb/
+
+  # Rebuilds the README's size table (between <!-- size-table:begin --> and
+  # <!-- size-table:end -->) from the DB-IP Lite month pinned in
+  # scripts/size-table.month and fails, printing a diff, when README.md
+  # differs: a builder change that moves any size or count must regenerate it
+  # (scripts/size-table.sh update). DB-IP serves only the current month, so
+  # the sources come from our own release data-<month>, where data.yml
+  # attaches them; a release made before that has none, and the check is then
+  # skipped with a notice rather than failed. The sources are test input only:
+  # nothing built here is uploaded or published.
+  size-table:
+    name: README size table
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: stable
+          cache: true
+
+      # fetch downloads the three sources and checks them against the
+      # release's checksums.txt. It exits 0 (sources ready), 1 (the release
+      # has no source assets -> skip) or 2 (any error -> fail).
+      - name: Fetch the pinned DB-IP Lite sources
+        id: fetch
+        run: |
+          month="$(scripts/size-table.sh month)"
+          rc=0
+          scripts/size-table.sh fetch "$RUNNER_TEMP/size-table" || rc=$?
+          case "$rc" in
+            0) echo "found=true" >> "$GITHUB_OUTPUT" ;;
+            1) echo "found=false" >> "$GITHUB_OUTPUT"
+               echo "::notice::release data-${month} has no DB-IP Lite source assets; the README size table check is skipped"
+               echo "Release \`data-${month}\` has no DB-IP Lite source assets: the README size table check was skipped." >> "$GITHUB_STEP_SUMMARY" ;;
+            *) exit "$rc" ;;
+          esac
+
+      # 16 builds through go run, so without the race detector, which would
+      # slow the City builds past any useful timeout (see integration).
+      - name: Check the README size table
+        if: steps.fetch.outputs.found == 'true'
+        run: scripts/size-table.sh check "$RUNNER_TEMP/size-table"
