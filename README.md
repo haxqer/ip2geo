@@ -168,6 +168,31 @@ faster.
 The city profile keeps 4 coordinate decimals (about 11 m) unless `-latscale`
 says otherwise.
 
+<!-- size-table:begin -->
+Each profile, field set and language option built from one free source,
+DB-IP Lite 2026-10 (City, Country and ASN editions, CC BY 4.0), by
+`scripts/size-table.sh`; ranges are the IPv4 and IPv6 index boundaries:
+
+| source | `ip2geo build` flags | size | records | IPv4 ranges | IPv6 ranges |
+|---|---|--:|--:|--:|--:|
+| City Lite | `-profile country` | 4.22 MiB | 252 | 341,345 | 347,185 |
+| City Lite | `-profile region` | 29.49 MiB | 3,913 | 2,101,387 | 2,209,952 |
+| City Lite | `-profile city` | 81.93 MiB | 560,896 | 3,619,640 | 4,166,177 |
+| City Lite | `-profile city -fields eu` | 82.46 MiB | 560,896 | 3,619,640 | 4,166,177 |
+| City Lite | `-profile city -fields continent` | 85.67 MiB | 560,896 | 3,619,640 | 4,166,177 |
+| City Lite | `-profile city -fields registered` | 94.77 MiB | 560,896 | 3,619,640 | 4,166,177 |
+| City Lite | `-profile city -fields subdivisions` | 89.42 MiB | 560,896 | 3,619,640 | 4,166,177 |
+| City Lite | `-profile city -fields postal` | 83.53 MiB | 560,896 | 3,619,640 | 4,166,177 |
+| City Lite | `-profile city -fields metro` | 83.00 MiB | 560,896 | 3,619,640 | 4,166,177 |
+| City Lite | `-profile city -fields traits` | 82.46 MiB | 560,896 | 3,619,640 | 4,166,177 |
+| City Lite | `-profile city -fields location` | 82.46 MiB | 560,896 | 3,619,640 | 4,166,177 |
+| City Lite | `-profile city -fields all` | 110.28 MiB | 560,896 | 3,619,640 | 4,166,177 |
+| City Lite | `-profile city -lang en,de,fr` | 91.56 MiB | 560,896 | 3,619,640 | 4,166,177 |
+| City Lite | `-profile city -fields all -lang en,de,fr` | 132.75 MiB | 560,896 | 3,619,640 | 4,166,177 |
+| Country Lite | `-profile country` | 4.29 MiB | 252 | 362,122 | 348,697 |
+| ASN Lite | `-profile asn` | 6.47 MiB | 82,136 | 483,069 | 128,784 |
+<!-- size-table:end -->
+
 The `.geoc` format is specified in [`docs/FORMAT.md`](docs/FORMAT.md).
 
 ## API
