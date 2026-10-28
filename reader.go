@@ -1,13 +1,11 @@
 package ip2geo
 
 import (
-	"bytes"
 	"encoding/binary"
-	"fmt"
-	"io"
-	"math"
 	"net/netip"
-	"os"
+	"runtime"
+
+	"github.com/haxqer/ip2geo/internal/format"
 )
 
 // idxBits for the direct-index (DXR) jump tables, chosen for a good
@@ -29,376 +27,72 @@ const (
 	v6KMask      = 1<<v6KBits - 1
 )
 
+// A v6l2 entry holds the index of the first start of its slot in the low 31
+// bits, and v6SlotExc when one of the slot's starts is an exception.
+const (
+	v6SlotExc     = 1 << 31
+	v6SlotIdxMask = v6SlotExc - 1
+)
+
 // Reader is a read-only handle to a compact database. It is safe for
 // concurrent use by multiple goroutines, Close included. Lookups perform no
 // allocation.
-type Reader struct {
-	profile Profile
-	latDiv  float64
-
-	strings []string // id -> string (id 0 == "")
-
-	records  []byte
-	recWidth int
-
-	// IPv4 index (DXR)
-	v4starts []uint32
-	v4rec    []uint32
-	lo4      []int32
-
-	// IPv6 index: starts split into big-endian halves, compared as two
-	// integers, and a two-level DXR table. v6dir[g] describes top-16 bucket
-	// g: its level-2 table is v6l2[o:o+1<<k], o = v6dir[g]>>v6KBits and
-	// k = v6dir[g]&v6KMask, and v6l2[o+s] is the index of the first start in
-	// slot s (the k bits after the top 16). The tables are laid end to end
-	// and end with len(v6hi), so a slot's starts are v6l2[o+s]:v6l2[o+s+1].
-	v6hi  []uint64
-	v6lo  []uint64
-	v6rec []uint32
-	v6dir *[1 << v6IdxBits]uint32
-	v6l2  []int32
-}
-
-// Open loads a compact database file into memory. It refuses files larger
-// than 2 GiB with ErrTooLarge and checks the 8-byte header before reading the
-// rest, so a wrong path fails fast. The contents are then validated as by
-// OpenBytes. Errors from the file system are returned as they are.
-func Open(path string) (*Reader, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
-	fi, err := f.Stat()
-	if err != nil {
-		return nil, err
-	}
-	size := fi.Size()
-	if size > maxFileSize || size >= math.MaxInt { // MaxInt bounds 32-bit builds
-		return nil, fmt.Errorf("ip2geo: %s is %d bytes, over the %d-byte limit: %w", path, size, int64(maxFileSize), ErrTooLarge)
-	}
-
-	var hdr [headerLen]byte
-	n, err := io.ReadFull(f, hdr[:])
-	if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
-		return nil, err
-	}
-	if err := checkHeader(hdr[:n]); err != nil {
-		return nil, err
-	}
-
-	// Stat's size is a hint: the file may change underfoot, and pipes and
-	// special files report 0. Read to EOF, but never past maxFileSize.
-	b := make([]byte, headerLen, int(max(size, headerLen)+1))
-	copy(b, hdr[:])
-	for {
-		if len(b) == cap(b) {
-			b = append(b, 0)[:len(b)]
-		}
-		m, err := f.Read(b[len(b):cap(b)])
-		b = b[:len(b)+m]
-		if uint64(len(b)) > maxFileSize {
-			return nil, fmt.Errorf("ip2geo: %s is over the %d-byte limit: %w", path, int64(maxFileSize), ErrTooLarge)
-		}
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			return nil, err
-		}
-	}
-	return OpenBytes(b)
-}
-
-// OpenBytes parses a compact database held in memory. b is not retained.
 //
-// The whole input is validated first: the header (magic, version, a known
-// profile, a lat/lon scale of at most 7, a zero reserved byte), every count
-// against the bytes left, a record width equal to RecWidth(profile), at least
-// one record, every record id below the record count, strictly ascending
-// IPv4 and IPv6 range starts, and no trailing bytes. Inputs over 2 GiB are
-// refused. Errors wrap ErrBadMagic, ErrUnsupportedVersion, ErrCorrupt or
-// ErrTooLarge.
-func OpenBytes(b []byte) (*Reader, error) {
-	if uint64(len(b)) > maxFileSize {
-		return nil, fmt.Errorf("ip2geo: input is %d bytes, over the %d-byte limit: %w", len(b), int64(maxFileSize), ErrTooLarge)
-	}
-	if err := checkHeader(b); err != nil {
-		return nil, err
-	}
-	r := &Reader{profile: Profile(b[5]), latDiv: math.Pow10(int(b[6]))}
-	c := cursor{b: b, off: headerLen}
+// The tables are laid out as the sections of a GEO2 file (docs/FORMAT.md),
+// read with little-endian loads: for a GEO2 file they are sub-slices of the
+// mapped or retained file, for a GEO1 file they are built on the heap at
+// open. Every section has been validated, so the searches below index them
+// without further checks.
+type Reader struct {
+	profile  Profile
+	idWidth  uint8 // bytes per record id in v4ids and v6ids, 1..4
+	recWidth int   // packed record width, format.RecordWidth(profile)
+	latDiv   float64
 
-	// Strings. Each needs at least its 2-byte length, which bounds the count
-	// before anything is allocated.
-	ns, err := c.u32("string count")
-	if err != nil {
-		return nil, err
-	}
-	if uint64(ns) > c.rem()/2 {
-		return nil, fmt.Errorf("ip2geo: %d strings cannot fit in %d bytes: %w", ns, c.rem(), ErrCorrupt)
-	}
-	r.strings = make([]string, ns)
-	for i := range r.strings {
-		l, err := c.u16("string length")
-		if err != nil {
-			return nil, err
-		}
-		s, err := c.take(uint64(l), 1, "string")
-		if err != nil {
-			return nil, err
-		}
-		r.strings[i] = string(s)
-	}
+	strings []string // id -> string over a heap copy of STRBLOB; strings[0] == ""
+	records []byte   // RECORDS: packed records, record 0 all zero
 
-	// Records. Record 0 is the not-found sentinel, so there is at least one,
-	// and the width must be exactly what decode reads for the profile.
-	rc, err := c.u32("record count")
-	if err != nil {
-		return nil, err
-	}
-	rw, err := c.u16("record width")
-	if err != nil {
-		return nil, err
-	}
-	if rc == 0 {
-		return nil, fmt.Errorf("ip2geo: no records, record 0 is required: %w", ErrCorrupt)
-	}
-	if int(rw) != RecWidth(r.profile) {
-		return nil, fmt.Errorf("ip2geo: record width %d, %s profile needs %d: %w", rw, r.profile, RecWidth(r.profile), ErrCorrupt)
-	}
-	recs, err := c.take(uint64(rc), uint64(rw), "records")
-	if err != nil {
-		return nil, err
-	}
-	r.records = bytes.Clone(recs)
-	r.recWidth = int(rw)
+	// IPv4: V4IDX (u32[65537]), V4STARTS (u16 per boundary), V4IDS, and the
+	// top-20 table built at open: lo4[g] is the index of the first boundary
+	// whose absolute start is >= g<<v4Shift, and lo4[1<<v4IdxBits] == nV4.
+	v4idx    []byte
+	v4starts []byte
+	v4ids    []byte
+	lo4      *[1<<v4IdxBits + 1]int32
 
-	// IPv4 ranges: n4 starts, then n4 record ids.
-	n4, err := c.u32("IPv4 range count")
-	if err != nil {
-		return nil, err
-	}
-	starts4, err := c.take(uint64(n4), 4, "IPv4 starts")
-	if err != nil {
-		return nil, err
-	}
-	ids4, err := c.take(uint64(n4), 4, "IPv4 record ids")
-	if err != nil {
-		return nil, err
-	}
-	r.v4starts = make([]uint32, n4)
-	for i := range r.v4starts {
-		s := binary.LittleEndian.Uint32(starts4[i*4:])
-		if i > 0 && s <= r.v4starts[i-1] {
-			return nil, fmt.Errorf("ip2geo: IPv4 start %d is not above start %d: %w", i, i-1, ErrCorrupt)
-		}
-		r.v4starts[i] = s
-	}
-	if r.v4rec, err = recordIDs(ids4, rc, "IPv4"); err != nil {
-		return nil, err
-	}
+	// IPv6: V6STARTS (the top 64 bits of each start), V6IDS, and the
+	// exception table V6EXCIDX/V6EXCLO holding the non-zero low halves.
+	// v6exc has bit i set when start i is an exception. v6dir[g] describes
+	// top-16 bucket g: its level-2 table is v6l2[o:o+1<<k], o = v6dir[g]>>v6KBits
+	// and k = v6dir[g]&v6KMask, and v6l2[o+s]&v6SlotIdxMask is the index of the
+	// first start in slot s (the k bits after the top 16). The tables are laid
+	// end to end and end with nV6, so a slot's starts run from its entry to the
+	// next one. An entry also has v6SlotExc set when its slot holds an
+	// exception.
+	v6hi     []byte
+	v6ids    []byte
+	v6excIdx []byte
+	v6excLo  []byte
+	v6exc    []uint64
+	v6dir    *[1 << v6IdxBits]uint32
+	v6l2     []uint32
 
-	// IPv6 ranges: n6 16-byte big-endian starts, then n6 record ids.
-	n6, err := c.u32("IPv6 range count")
-	if err != nil {
-		return nil, err
-	}
-	starts6, err := c.take(uint64(n6), 16, "IPv6 starts")
-	if err != nil {
-		return nil, err
-	}
-	ids6, err := c.take(uint64(n6), 4, "IPv6 record ids")
-	if err != nil {
-		return nil, err
-	}
-	r.v6hi = make([]uint64, n6)
-	r.v6lo = make([]uint64, n6)
-	for i := range r.v6hi {
-		hi := binary.BigEndian.Uint64(starts6[i*16:])
-		lo := binary.BigEndian.Uint64(starts6[i*16+8:])
-		if i > 0 && !less128(r.v6hi[i-1], r.v6lo[i-1], hi, lo) {
-			return nil, fmt.Errorf("ip2geo: IPv6 start %d is not above start %d: %w", i, i-1, ErrCorrupt)
-		}
-		r.v6hi[i], r.v6lo[i] = hi, lo
-	}
-	if r.v6rec, err = recordIDs(ids6, rc, "IPv6"); err != nil {
-		return nil, err
-	}
-
-	if c.rem() != 0 {
-		return nil, fmt.Errorf("ip2geo: %d trailing bytes: %w", c.rem(), ErrCorrupt)
-	}
-	r.buildIndex()
-	return r, nil
-}
-
-// checkHeader validates the fixed header: magic, version, profile, lat/lon
-// scale and the reserved byte. Only the first headerLen bytes are read.
-func checkHeader(h []byte) error {
-	if len(h) < len(magic) || string(h[:len(magic)]) != magic {
-		return fmt.Errorf("ip2geo: magic %q, want %q: %w", h[:min(len(h), len(magic))], magic, ErrBadMagic)
-	}
-	if len(h) < headerLen {
-		return fmt.Errorf("ip2geo: truncated header, %d of %d bytes: %w", len(h), headerLen, ErrCorrupt)
-	}
-	if h[4] != version {
-		return fmt.Errorf("ip2geo: format version %d, want %d: %w", h[4], version, ErrUnsupportedVersion)
-	}
-	if Profile(h[5]) > ProfileCity {
-		return fmt.Errorf("ip2geo: unknown profile %d: %w", h[5], ErrCorrupt)
-	}
-	if h[6] > maxLatScale {
-		return fmt.Errorf("ip2geo: lat/lon scale %d is over %d: %w", h[6], maxLatScale, ErrCorrupt)
-	}
-	if h[7] != 0 {
-		return fmt.Errorf("ip2geo: reserved header byte is %d, want 0: %w", h[7], ErrCorrupt)
-	}
-	return nil
-}
-
-// cursor walks the input. A size is a u32 count times a width of at most
-// 2^16, formed in uint64 so it cannot wrap, and is checked against the bytes
-// left before any slice is taken. 32-bit builds are as safe as 64-bit ones.
-type cursor struct {
-	b   []byte
-	off int
-}
-
-func (c *cursor) rem() uint64 { return uint64(len(c.b) - c.off) }
-
-// take returns the next count*width bytes.
-func (c *cursor) take(count, width uint64, what string) ([]byte, error) {
-	n := count * width
-	if n > c.rem() {
-		return nil, fmt.Errorf("ip2geo: truncated %s, need %d bytes, have %d: %w", what, n, c.rem(), ErrCorrupt)
-	}
-	s := c.b[c.off : c.off+int(n)]
-	c.off += int(n)
-	return s, nil
-}
-
-func (c *cursor) u32(what string) (uint32, error) {
-	s, err := c.take(1, 4, what)
-	if err != nil {
-		return 0, err
-	}
-	return binary.LittleEndian.Uint32(s), nil
-}
-
-func (c *cursor) u16(what string) (uint16, error) {
-	s, err := c.take(1, 2, what)
-	if err != nil {
-		return 0, err
-	}
-	return binary.LittleEndian.Uint16(s), nil
-}
-
-// recordIDs decodes little-endian u32 record ids, each of which must be
-// below the record count rc.
-func recordIDs(b []byte, rc uint32, family string) ([]uint32, error) {
-	ids := make([]uint32, len(b)/4)
-	for i := range ids {
-		id := binary.LittleEndian.Uint32(b[i*4:])
-		if id >= rc {
-			return nil, fmt.Errorf("ip2geo: %s range %d points at record %d of %d: %w", family, i, id, rc, ErrCorrupt)
-		}
-		ids[i] = id
-	}
-	return ids, nil
-}
-
-// buildIndex constructs the DXR direct-index jump tables.
-func (r *Reader) buildIndex() {
-	// v4: top v4IdxBits bits
-	size4 := (1 << v4IdxBits) + 1
-	r.lo4 = make([]int32, size4)
-	bi := 0
-	n4 := len(r.v4starts)
-	for g := 0; g < size4; g++ {
-		var thr uint64
-		if g == size4-1 {
-			thr = 1 << 32
-		} else {
-			thr = uint64(g) << v4Shift
-		}
-		for bi < n4 && uint64(r.v4starts[bi]) < thr {
-			bi++
-		}
-		r.lo4[g] = int32(bi)
-	}
-
-	r.buildIndex6()
-}
-
-// buildIndex6 constructs the two-level IPv6 table described at Reader.v6dir.
-func (r *Reader) buildIndex6() {
-	hi := r.v6hi
-	n := len(hi)
-	dir := new([1 << v6IdxBits]uint32)
-
-	// Size each bucket's level-2 table from the number of starts in it. A
-	// bucket of c > v6SlotStarts starts gets fewer than c/4 slots, so there
-	// are fewer than 2^16 + n/4 in all: under 2^27 for any input below
-	// maxFileSize (n < 2^31/20), which leaves v6KBits bits for k in a uint32.
-	slots, i := 0, 0
-	for g := range dir {
-		j := i
-		for j < n && hi[j]>>(64-v6IdxBits) == uint64(g) {
-			j++
-		}
-		k := v6L2Bits(j - i)
-		dir[g] = uint32(slots)<<v6KBits | uint32(k)
-		slots += 1 << k
-		i = j
-	}
-	l2 := make([]int32, slots+1)
-	i = 0
-	for g, d := range dir {
-		o, k := int(d>>v6KBits), d&v6KMask
-		for s := range 1 << k {
-			for i < n && hi[i]>>(64-v6IdxBits) == uint64(g) && v6Slot(hi[i], k) < uint64(s) {
-				i++
-			}
-			l2[o+s] = int32(i)
-		}
-		for i < n && hi[i]>>(64-v6IdxBits) == uint64(g) {
-			i++
-		}
-	}
-	l2[slots] = int32(n)
-	r.v6dir, r.v6l2 = dir, l2
-}
-
-// v6L2Bits returns the level-2 bits for a top-16 bucket holding count range
-// starts: ceil(log2(count/v6SlotStarts)), clamped to [0, v6MaxL2Bits].
-func v6L2Bits(count int) int {
-	k := 0
-	for k < v6MaxL2Bits && count > v6SlotStarts<<k {
-		k++
-	}
-	return k
-}
-
-// v6Slot returns the k bits that follow the top 16 bits of hi, the level-2
-// slot of hi in its bucket. k is at most v6MaxL2Bits; for k == 0 it is 0.
-func v6Slot(hi uint64, k uint32) uint64 {
-	return hi << v6IdxBits >> 1 >> ((63 - k) & 63)
-}
-
-// less128 reports whether the 128-bit value ahi:alo is below bhi:blo.
-func less128(ahi, alo, bhi, blo uint64) bool {
-	return ahi < bhi || ahi == bhi && alo < blo
+	meta   Metadata
+	mapped bool // the sections are in a memory mapping released by a cleanup
 }
 
 // Profile reports the precision profile the database was built with.
 func (r *Reader) Profile() Profile { return r.profile }
 
-// Close does nothing and returns nil. The database lives on the Go heap, so
-// there is nothing to release today; the garbage collector reclaims it once
-// the Reader is unreachable. Close is safe to call concurrently with Lookup,
-// and the Reader keeps answering after Close. The method is kept so that a
-// future memory-mapped Reader can release its mapping.
+// Metadata returns the file's header and META fields and its table sizes.
+func (r *Reader) Metadata() Metadata { return r.meta }
+
+// Close does nothing and returns nil. A memory-mapped database is unmapped
+// by the garbage collector once the Reader is unreachable (through
+// runtime.AddCleanup), not by Close, so a Lookup that overlaps Close or
+// follows it is still safe and keeps answering. Drop every reference to the
+// Reader to release its memory. Close is safe to call concurrently with
+// Lookup and more than once.
 func (r *Reader) Close() error { return nil }
 
 // Lookup resolves an IP address to a Record. ok is false when the address is
@@ -421,10 +115,13 @@ func (r *Reader) Lookup(ip netip.Addr) (rec Record, ok bool) {
 			id = r.search6(binary.BigEndian.Uint64(a[:8]), binary.BigEndian.Uint64(a[8:]))
 		}
 	}
-	if id == 0 {
-		return Record{}, false
+	if id != 0 {
+		rec, ok = r.decode(id), true
 	}
-	return r.decode(id), true
+	// The sections may live in a mapping that a cleanup releases once r is
+	// unreachable: keep r alive until the last read from them.
+	runtime.KeepAlive(r)
+	return rec, ok
 }
 
 // City is an alias for Lookup, provided for familiarity with geoip2-golang.
@@ -450,18 +147,24 @@ func embeddedV4(k *[16]byte) (uint32, bool) {
 	return 0, false
 }
 
+// The searches load an element as v[i*w:i*w+w] rather than v[i*w:]: with a
+// known length the compiler loads straight from &v[0] + i*w, keeping the
+// bounds checks off the dependency chain of the binary search.
+
+// search4 returns the record id of the IPv4 key, 0 when it is not covered.
+// The boundaries of the key's top-20 window share its top 16 bits, so the
+// binary search compares the low 16 bits only. It finds the first boundary
+// of the window above the key; the one before it holds the key, and when
+// that is the boundary before the window (window start - 1) it is the last
+// boundary of an earlier window, as docs/FORMAT.md describes.
 func (r *Reader) search4(key uint32) uint32 {
 	g := key >> v4Shift
-	lo := int(r.lo4[g])
-	if lo > 0 {
-		lo--
-	}
-	hi := int(r.lo4[g+1])
-	l, h := lo, hi
+	l, h := int(r.lo4[g]), int(r.lo4[g+1])
+	k := uint16(key)
 	s := r.v4starts
 	for l < h {
-		mid := (l + h) >> 1
-		if s[mid] > key {
+		mid := int(uint(l+h) >> 1)
+		if binary.LittleEndian.Uint16(s[mid*2:mid*2+2]) > k {
 			h = mid
 		} else {
 			l = mid + 1
@@ -470,58 +173,197 @@ func (r *Reader) search4(key uint32) uint32 {
 	if l == 0 {
 		return 0
 	}
-	return r.v4rec[l-1]
+	return format.ReadID(r.v4ids, r.idWidth, l-1)
 }
 
 // search6 returns the record id of the range holding the IPv6 key hi:lo, or
 // 0 when the key is below the first start. Every start before the key's
-// level-2 slot is below the key and every start after it is above, so the
-// binary search covers the slot alone: it finds the first start above the
-// key, and the range before that one holds the key.
+// level-2 slot has a smaller top half than the key and every start after it a
+// larger one, so the binary search over the top halves covers the slot
+// alone: it finds the last start i whose top half is <= hi. Starts sharing
+// the key's top half are ordered by their low half, which is 0 except for
+// the exceptions, so when the slot holds an exception the search steps back
+// while start i has the key's top half and a low half above lo. A start
+// before the slot has a smaller top half, so the step back stays in it.
 func (r *Reader) search6(hi, lo uint64) uint32 {
 	d := r.v6dir[hi>>(64-v6IdxBits)]
 	s := d>>v6KBits + uint32(v6Slot(hi, d&v6KMask))
-	l, h := int(r.v6l2[s]), int(r.v6l2[s+1])
+	e := r.v6l2[s]
+	l, h := int(e&v6SlotIdxMask), int(r.v6l2[s+1]&v6SlotIdxMask)
+	first := l
+	v := r.v6hi
 	for l < h {
 		mid := int(uint(l+h) >> 1)
-		if less128(hi, lo, r.v6hi[mid], r.v6lo[mid]) {
+		if binary.LittleEndian.Uint64(v[mid*8:mid*8+8]) > hi {
 			h = mid
 		} else {
 			l = mid + 1
 		}
 	}
-	if l == 0 {
+	i := l - 1
+	if e&v6SlotExc != 0 && i >= first {
+		i = r.v6StepBack(i, hi, lo)
+	}
+	if i < 0 {
 		return 0
 	}
-	return r.v6rec[l-1]
+	return format.ReadID(r.v6ids, r.idWidth, i)
 }
 
-func (r *Reader) str(id uint32) string {
-	if id == 0 || int(id) >= len(r.strings) {
-		return ""
+// v6StepBack returns the last start at or before i that is <= hi:lo, given
+// that every start after i is above it and start i's top half is <= hi.
+func (r *Reader) v6StepBack(i int, hi, lo uint64) int {
+	for i >= 0 && binary.LittleEndian.Uint64(r.v6hi[i*8:i*8+8]) == hi && r.v6exc[uint(i)>>6]&(1<<(uint(i)&63)) != 0 && r.v6ExcLo(i) > lo {
+		i--
 	}
-	return r.strings[id]
+	return i
 }
 
+// v6ExcLo returns the low half of IPv6 start i, which must be an exception.
+func (r *Reader) v6ExcLo(i int) uint64 {
+	idx := r.v6excIdx
+	l, h := 0, len(idx)/4
+	for l < h {
+		mid := int(uint(l+h) >> 1)
+		if int(binary.LittleEndian.Uint32(idx[mid*4:mid*4+4])) < i {
+			l = mid + 1
+		} else {
+			h = mid
+		}
+	}
+	return binary.LittleEndian.Uint64(r.v6excLo[l*8 : l*8+8])
+}
+
+// decode reads packed record id. Every string id in it was checked against
+// the string table at open. The record is read through array pointers, so
+// that its fields need no bounds checks of their own.
 func (r *Reader) decode(id uint32) Record {
-	b := r.records[int(id)*r.recWidth:]
-	u := func(i int) uint32 { return binary.LittleEndian.Uint32(b[i*4:]) }
+	le := binary.LittleEndian
+	off := int(id) * r.recWidth
+	c := (*[format.RecWidthCountry]byte)(r.records[off : off+format.RecWidthCountry])
 	var rec Record
-	rec.CountryISO = r.str(u(0))
-	rec.CountryName = r.str(u(1))
-	rec.Continent = r.str(u(2))
-	rec.CountryGeoNameID = u(3)
+	rec.CountryISO = r.strings[le.Uint16(c[format.RecCountryISO:])]
+	rec.CountryName = r.strings[le.Uint16(c[format.RecCountryName:])]
+	rec.Continent = r.strings[le.Uint16(c[format.RecContinent:])]
+	rec.CountryGeoNameID = le.Uint32(c[format.RecCountryGeo:])
 	if r.profile >= ProfileRegion {
-		rec.RegionISO = r.str(u(4))
-		rec.RegionName = r.str(u(5))
+		g := (*[format.RecWidthRegion]byte)(r.records[off : off+format.RecWidthRegion])
+		rec.RegionISO = r.strings[le.Uint16(g[format.RecRegionISO:])]
+		rec.RegionName = r.strings[le.Uint16(g[format.RecRegionName:])]
 	}
 	if r.profile >= ProfileCity {
-		rec.City = r.str(u(6))
-		rec.CityGeoNameID = u(7)
-		rec.Latitude = float64(int32(u(8))) / r.latDiv
-		rec.Longitude = float64(int32(u(9))) / r.latDiv
-		rec.AccuracyRadius = uint16(u(10))
-		rec.TimeZone = r.str(u(11))
+		y := (*[format.RecWidthCity]byte)(r.records[off : off+format.RecWidthCity])
+		rec.City = r.strings[format.Uint24(y[format.RecCityName:])]
+		rec.CityGeoNameID = le.Uint32(y[format.RecCityGeo:])
+		rec.Latitude = float64(int32(le.Uint32(y[format.RecLat:]))) / r.latDiv
+		rec.Longitude = float64(int32(le.Uint32(y[format.RecLon:]))) / r.latDiv
+		rec.AccuracyRadius = le.Uint16(y[format.RecAccuracy:])
+		rec.TimeZone = r.strings[le.Uint16(y[format.RecTimeZone:])]
 	}
 	return rec
+}
+
+// buildIndex builds the in-memory indexes over validated sections: the
+// top-20 IPv4 table, the two-level IPv6 table and the IPv6 exception bitmap,
+// and flags the level-2 slots that hold an exception.
+func (r *Reader) buildIndex() {
+	le := binary.LittleEndian
+	r.buildIndex4()
+	r.buildIndex6()
+	n6 := len(r.v6hi) / 8
+	exc := make([]uint64, (n6+63)/64)
+	for j := 0; j < len(r.v6excIdx); j += 4 {
+		i := le.Uint32(r.v6excIdx[j:])
+		exc[i>>6] |= 1 << (i & 63)
+		hi := le.Uint64(r.v6hi[i*8:])
+		d := r.v6dir[hi>>(64-v6IdxBits)]
+		r.v6l2[d>>v6KBits+uint32(v6Slot(hi, d&v6KMask))] |= v6SlotExc
+	}
+	r.v6exc = exc
+}
+
+// buildIndex4 derives the top-20 table lo4 from V4IDX and the u16 starts:
+// top-16 bucket G holds boundaries V4IDX[G]:V4IDX[G+1], and its 16 top-20
+// sub-buckets split them on the top 4 bits of their u16 value.
+func (r *Reader) buildIndex4() {
+	const sub = 1 << (v4IdxBits - 16)
+	le := binary.LittleEndian
+	s := r.v4starts
+	lo4 := new([1<<v4IdxBits + 1]int32)
+	for g := range 1 << 16 {
+		i, end := int(le.Uint32(r.v4idx[g*4:])), int(le.Uint32(r.v4idx[g*4+4:]))
+		for k := range sub {
+			for i < end && int(le.Uint16(s[i*2:])) < k<<v4Shift {
+				i++
+			}
+			lo4[g*sub+k] = int32(i)
+		}
+	}
+	lo4[1<<v4IdxBits] = int32(len(s) / 2)
+	r.lo4 = lo4
+}
+
+// buildIndex6 constructs the two-level IPv6 table described at Reader.v6dir
+// over the top halves of the starts.
+func (r *Reader) buildIndex6() {
+	le := binary.LittleEndian
+	v := r.v6hi
+	n := len(v) / 8
+	top := func(i int) uint64 { return le.Uint64(v[i*8:]) >> (64 - v6IdxBits) }
+	dir := new([1 << v6IdxBits]uint32)
+
+	// Size each bucket's level-2 table from the number of starts in it. A
+	// bucket of c > v6SlotStarts starts gets fewer than c/4 slots, so there
+	// are fewer than 2^16 + n/4 in all: under 2^27 for any input below
+	// maxFileSize (a GEO2 start takes at least 9 bytes, a GEO1 one 20, so
+	// n < 2^31/9 < 2^28), which leaves v6KBits bits for k in a uint32, and n
+	// fits the 31 index bits of a v6l2 entry.
+	slots, i := 0, 0
+	for g := range dir {
+		j := i
+		for j < n && top(j) == uint64(g) {
+			j++
+		}
+		k := v6L2Bits(j - i)
+		dir[g] = uint32(slots)<<v6KBits | uint32(k)
+		slots += 1 << k
+		i = j
+	}
+	l2 := make([]uint32, slots+1)
+	i = 0
+	for g, d := range dir {
+		o, k := int(d>>v6KBits), d&v6KMask
+		for s := range 1 << k {
+			for i < n && top(i) == uint64(g) && v6Slot(le.Uint64(v[i*8:]), k) < uint64(s) {
+				i++
+			}
+			l2[o+s] = uint32(i)
+		}
+		for i < n && top(i) == uint64(g) {
+			i++
+		}
+	}
+	l2[slots] = uint32(n)
+	r.v6dir, r.v6l2 = dir, l2
+}
+
+// v6L2Bits returns the level-2 bits for a top-16 bucket holding count range
+// starts: ceil(log2(count/v6SlotStarts)), clamped to [0, v6MaxL2Bits].
+func v6L2Bits(count int) int {
+	k := 0
+	for k < v6MaxL2Bits && count > v6SlotStarts<<k {
+		k++
+	}
+	return k
+}
+
+// v6Slot returns the k bits that follow the top 16 bits of hi, the level-2
+// slot of hi in its bucket. k is at most v6MaxL2Bits; for k == 0 it is 0.
+func v6Slot(hi uint64, k uint32) uint64 {
+	return hi << v6IdxBits >> 1 >> ((63 - k) & 63)
+}
+
+// less128 reports whether the 128-bit value ahi:alo is below bhi:blo.
+func less128(ahi, alo, bhi, blo uint64) bool {
+	return ahi < bhi || ahi == bhi && alo < blo
 }
