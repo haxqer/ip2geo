@@ -91,18 +91,19 @@ func (d *srcDecoder) decode(res maxminddb.Result, r *srcRecord) error {
 	return nil
 }
 
-// key returns the record key of r for profile p. It interns the strings in
-// a fixed order, so string ids depend only on the order in which records
-// are first seen.
+// key returns the record key of r for profile p, with provisional string
+// ids. It interns the strings in a fixed order, so string ids depend only on
+// the order in which records are first seen, and marks every string but the
+// city name as used by a 16-bit field.
 func (r *srcRecord) key(p ip2geo.Profile, scale float64, strs *interner) recKey {
 	var k recKey
-	k.countryISO = strs.id(r.Country.ISOCode)
-	k.countryName = strs.id(r.countryName)
-	k.continent = strs.id(r.Continent.Code)
+	k.countryISO = strs.id16(r.Country.ISOCode)
+	k.countryName = strs.id16(r.countryName)
+	k.continent = strs.id16(r.Continent.Code)
 	k.countryGeo = r.Country.GeoNameID
 	if p >= ip2geo.ProfileRegion {
-		k.regionISO = strs.id(r.regionISO)
-		k.regionName = strs.id(r.regionName)
+		k.regionISO = strs.id16(r.regionISO)
+		k.regionName = strs.id16(r.regionName)
 	}
 	if p >= ip2geo.ProfileCity {
 		k.cityName = strs.id(r.cityName)
@@ -110,7 +111,7 @@ func (r *srcRecord) key(p ip2geo.Profile, scale float64, strs *interner) recKey 
 		k.lat = int32(math.Round(r.Location.Lat * scale))
 		k.lon = int32(math.Round(r.Location.Lon * scale))
 		k.acc = r.Location.Acc
-		k.tz = strs.id(r.Location.TZ)
+		k.tz = strs.id16(r.Location.TZ)
 	}
 	return k
 }

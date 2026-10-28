@@ -10,6 +10,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/haxqer/ip2geo"
 	"github.com/haxqer/ip2geo/mmdb"
@@ -518,6 +519,9 @@ func TestOptionsValidation(t *testing.T) {
 		{"LatScale 8 country", mmdb.Options{LatScale: 8}},
 		{"Profile 3", mmdb.Options{Profile: ip2geo.Profile(3)}},
 		{"Profile 255", mmdb.Options{Profile: ip2geo.Profile(255)}},
+		{"BuildTime before 1970", mmdb.Options{BuildTime: time.Date(1969, 12, 31, 23, 59, 59, 0, time.UTC)}},
+		{"Description not UTF-8", mmdb.Options{Description: "caf\xe9"}},
+		{"Description too long", mmdb.Options{Description: strings.Repeat("d", 1<<16)}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -684,9 +688,11 @@ func TestBuildReplacesOutput(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	src := writeMMDB(t, cityFixture())
+	// A fixed build time: the two builds may fall in different seconds.
+	opts := mmdb.Options{BuildTime: fixedBuildTime}
 
 	fresh := filepath.Join(dir, "fresh.geoc")
-	if _, err := mmdb.Build(src, fresh, mmdb.Options{}); err != nil {
+	if _, err := mmdb.Build(src, fresh, opts); err != nil {
 		t.Fatal(err)
 	}
 	old := filepath.Join(dir, "old.geoc")
@@ -696,7 +702,7 @@ func TestBuildReplacesOutput(t *testing.T) {
 	if err := os.Chmod(old, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := mmdb.Build(src, old, mmdb.Options{}); err != nil {
+	if _, err := mmdb.Build(src, old, opts); err != nil {
 		t.Fatal(err)
 	}
 	a, _ := os.ReadFile(fresh)
