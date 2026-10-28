@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-28
+
 ### Changed
 - IPv6 lookups use a two-level jump table (the top 16 bits, then an adaptive
   number of bits inside each populated bucket) and compare range starts as two
@@ -135,5 +137,6 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   failed build never leaves a partial output file.
 - The CLI validates `-latscale` instead of truncating it to 8 bits.
 
-[Unreleased]: https://github.com/haxqer/ip2geo/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/haxqer/ip2geo/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/haxqer/ip2geo/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/haxqer/ip2geo/releases/tag/v0.1.0
