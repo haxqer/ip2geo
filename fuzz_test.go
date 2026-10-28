@@ -93,7 +93,26 @@ func fuzzSeeds() [][]byte {
 	d := cityTestDB().withProfile(ProfileCountry)
 	d.strs, d.recCount, d.records = nil, 1, d.records[:RecWidth(ProfileCountry)]
 	d.v4starts, d.v4rec, d.v6starts, d.v6rec = nil, nil, nil, nil
-	return append(out, toGEO2(d, g2opts{}).encode())
+	out = append(out, toGEO2(d, g2opts{}).encode())
+
+	// Revision 2.1: every field set and three languages, the sets each
+	// smaller profile allows with two, languages only, an empty field set,
+	// and an ASN database.
+	for _, x := range []struct {
+		d *testDB
+		e *g2ext
+	}{
+		{cityTestDB(), laExt()},
+		{excTestDB(), laExt()},
+		{cityTestDB().withProfile(ProfileCountry), &g2ext{fields: xEU | xContinent | xRegistered | xTraits, langs: []string{"en", "de"}, recs: laExt().recs}},
+		{cityTestDB().withProfile(ProfileRegion), &g2ext{fields: xSubdivisions | xEU, langs: []string{"en", "fr"}, recs: laExt().recs}},
+		{cityTestDB(), &g2ext{langs: []string{"en", "de", "fr"}, recs: laExt().recs}},
+		{cityTestDB(), &g2ext{}},
+		{asnTestDB(), nil},
+	} {
+		out = append(out, toGEO2(x.d, g2opts{meta: testMeta, ext: x.e}).encode())
+	}
+	return out
 }
 
 func v4Forms(a [4]byte) []netip.Addr {
@@ -143,6 +162,10 @@ func add16(k [16]byte, delta int) [16]byte {
 // sections as docs/FORMAT.md defines them.
 func checkIndex(t *testing.T, r *Reader) {
 	const maxStarts = 256
+	decode := r.decode
+	if r.alt { // an ASN database or another language
+		decode = r.decodeAlt
+	}
 	starts4 := refStarts4(r)
 	ref4 := func(k uint32) uint32 {
 		i := sort.Search(len(starts4), func(i int) bool { return starts4[i] > k })
@@ -167,7 +190,7 @@ func checkIndex(t *testing.T, r *Reader) {
 		var a [4]byte
 		binary.BigEndian.PutUint32(a[:], k)
 		rec, ok := r.Lookup(netip.AddrFrom4(a))
-		if ok != (want != 0) || (ok && rec != r.decode(want)) {
+		if ok != (want != 0) || (ok && rec != decode(want)) {
 			t.Fatalf("Lookup(%v) = %+v, %v; want record %d", netip.AddrFrom4(a), rec, ok, want)
 		}
 	}
@@ -272,6 +295,7 @@ func FuzzOpenBytes(f *testing.F) {
 				continue
 			}
 			checkReader(t, r)
+			checkDetails(t, r)
 		}
 	})
 }
@@ -293,5 +317,6 @@ func FuzzLookup(f *testing.F) {
 		}
 		checkReader(t, r)
 		checkIndex(t, r)
+		checkDetails(t, r)
 	})
 }
