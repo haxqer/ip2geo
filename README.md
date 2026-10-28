@@ -49,7 +49,7 @@ dataset and start looking up addresses immediately:
 
 ```sh
 # pick one: country (1.7 MB), region (11 MB), or city (32 MB)
-curl -LO https://github.com/haxqer/ip2geo/releases/download/data-2026-07/dbip-city-lite.geoc.gz
+curl -LO https://github.com/haxqer/ip2geo/releases/download/data-2026-10/dbip-city-lite.geoc.gz
 gunzip dbip-city-lite.geoc.gz
 
 go run github.com/haxqer/ip2geo/cmd/ip2geo@latest lookup -db dbip-city-lite.geoc 8.8.8.8
