@@ -88,6 +88,7 @@ func indexSizes(r *Reader) string {
 //
 // Address sets: ipv4-random is uniform over IPv4; ipv6-ranges is a random
 // address in a random IPv6 range that has data, every range equally likely.
+// details/ and range/ measure LookupDetails and LookupRange on the file.
 func BenchmarkLookupFile(b *testing.B) {
 	path := os.Getenv("IP2GEO_TEST_GEOC")
 	if path == "" {
@@ -191,8 +192,48 @@ func BenchmarkLookupFile(b *testing.B) {
 				}
 				benchLookups(b, rd.r, set.addrs)
 			})
+			// LookupDetails and LookupRange, on the file as it is.
+			if rd.name != fmt.Sprintf("geo%d", m.FormatVersion) {
+				continue
+			}
+			b.Run("details/"+set.name, func(b *testing.B) {
+				if len(set.addrs) == 0 {
+					b.Skip("no IPv6 ranges with data")
+				}
+				benchDetails(b, rd.r, set.addrs)
+			})
+			b.Run("range/"+set.name, func(b *testing.B) {
+				if len(set.addrs) == 0 {
+					b.Skip("no IPv6 ranges with data")
+				}
+				benchRanges(b, rd.r, set.addrs)
+			})
 		}
 	}
+}
+
+// benchDetails is benchLookups for LookupDetails.
+func benchDetails(b *testing.B, r *Reader, addrs []netip.Addr) {
+	b.ReportAllocs()
+	found := 0
+	for i := 0; b.Loop(); i++ {
+		if _, ok := r.LookupDetails(addrs[i&(len(addrs)-1)]); ok {
+			found++
+		}
+	}
+	sinkN = found
+}
+
+// benchRanges is benchLookups for LookupRange.
+func benchRanges(b *testing.B, r *Reader, addrs []netip.Addr) {
+	b.ReportAllocs()
+	found := 0
+	for i := 0; b.Loop(); i++ {
+		if _, ok := r.LookupRange(addrs[i&(len(addrs)-1)]); ok {
+			found++
+		}
+	}
+	sinkN = found
 }
 
 // benchLookups calls r.Lookup directly in the loop; len(addrs) is a power

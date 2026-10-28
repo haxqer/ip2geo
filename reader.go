@@ -46,6 +46,7 @@ const (
 type Reader struct {
 	profile  Profile
 	idWidth  uint8 // bytes per record id in v4ids and v6ids, 1..4
+	alt      bool  // Lookup does more than decode; see langs below
 	recWidth int   // packed record width, format.RecordWidth(profile)
 	latDiv   float64
 
@@ -89,12 +90,12 @@ type Reader struct {
 	// the index of the language Lookup and LookupDetails answer in, and
 	// when it is not 0, nameOff[k] is the offset in an XRECORDS entry of
 	// that language's u24 name of kind k, or -1 when the file has no such
-	// name. alt is set when Lookup must do more than decode: for an ASN
-	// database or a language other than the primary one.
+	// name. alt (beside profile, in the cache line Lookup reads anyway) is
+	// set when Lookup must do more than decode: for an ASN database or a
+	// language other than the primary one.
 	langs   []string
 	lang    int
 	nameOff [format.NumNameKinds]int
-	alt     bool
 
 	meta   Metadata
 	mapped bool // the sections are in a memory mapping released by a cleanup
