@@ -66,6 +66,7 @@ package ip2geo
 
 import (
 	"errors"
+	"net/netip"
 	"time"
 )
 
@@ -111,6 +112,9 @@ const (
 	ProfileRegion Profile = 1
 	// ProfileCity keeps country, region, city, and lat/lon, accuracy, time zone.
 	ProfileCity Profile = 2
+	// ProfileASN is an ASN database: autonomous system number and
+	// organization, read with Reader.ASN or Reader.LookupDetails.
+	ProfileASN Profile = 3
 )
 
 // String returns the profile name.
@@ -122,6 +126,8 @@ func (p Profile) String() string {
 		return "region"
 	case ProfileCity:
 		return "city"
+	case ProfileASN:
+		return "asn"
 	default:
 		return "unknown"
 	}
@@ -160,6 +166,94 @@ type Record struct {
 	TimeZone         string  // IANA time zone, e.g. "Europe/London"
 }
 
+// FieldSet selects optional fields stored beside a geo profile's Record
+// fields. A database built without a field set leaves the matching Details
+// fields at their zero value; Reader.Fields reports which sets a database
+// has. Each set is a bit; combine them with |.
+type FieldSet uint32
+
+const (
+	// FieldEU keeps country.is_in_european_union.
+	FieldEU FieldSet = 1 << iota
+	// FieldContinent keeps the continent name and GeoNames id.
+	FieldContinent
+	// FieldRegistered keeps registered_country and represented_country.
+	FieldRegistered
+	// FieldSubdivisions keeps the first subdivision's GeoNames id and the
+	// second subdivision. It needs ProfileRegion or ProfileCity.
+	FieldSubdivisions
+	// FieldPostal keeps the postal code. It needs ProfileCity.
+	FieldPostal
+	// FieldMetro keeps location.metro_code. It needs ProfileCity.
+	FieldMetro
+	// FieldTraits keeps traits.is_anycast, is_anonymous_proxy and
+	// is_satellite_provider.
+	FieldTraits
+	// FieldLocation records whether the coordinates and the accuracy radius
+	// are present, so a missing location is not read as (0, 0). It needs
+	// ProfileCity.
+	FieldLocation
+
+	// FieldsAll is every field set; for ProfileCountry and ProfileRegion
+	// the builder keeps the ones the profile allows.
+	FieldsAll = FieldEU | FieldContinent | FieldRegistered | FieldSubdivisions |
+		FieldPostal | FieldMetro | FieldTraits | FieldLocation
+)
+
+// Country is a country other than the located one: the country a network
+// is registered to, or the one a represented population belongs to.
+type Country struct {
+	ISO               string // ISO 3166-1 alpha-2
+	Name              string // localized name
+	GeoNameID         uint32
+	IsInEuropeanUnion bool
+}
+
+// ASN is the autonomous system of a network.
+type ASN struct {
+	Number       uint32 // autonomous system number
+	Organization string // autonomous system organization
+}
+
+// Details is a Record with every optional field. Fields of a field set the
+// database does not have, and fields missing in the source, are zero.
+type Details struct {
+	Record
+
+	ContinentName      string // FieldContinent
+	ContinentGeoNameID uint32 // FieldContinent
+	IsInEuropeanUnion  bool   // FieldEU
+
+	RegionGeoNameID  uint32 // FieldSubdivisions: the first subdivision
+	Region2ISO       string // FieldSubdivisions: the second subdivision
+	Region2Name      string
+	Region2GeoNameID uint32
+
+	PostalCode string // FieldPostal
+	MetroCode  uint16 // FieldMetro
+
+	// FieldLocation: whether the source has the coordinates and the
+	// accuracy radius. Without the set both are false.
+	HasCoordinates    bool
+	HasAccuracyRadius bool
+
+	RegisteredCountry      Country // FieldRegistered
+	RepresentedCountry     Country // FieldRegistered
+	RepresentedCountryType string  // FieldRegistered, e.g. "military"
+
+	IsAnycast           bool // FieldTraits
+	IsAnonymousProxy    bool // FieldTraits
+	IsSatelliteProvider bool // FieldTraits
+
+	ASN ASN // ProfileASN databases only
+}
+
+// Range is an inclusive address range: First and Last are in the same
+// family, and merged ranges need not be one CIDR prefix.
+type Range struct {
+	First, Last netip.Addr
+}
+
 // Metadata describes an open database: its file header, the META section of
 // a GEO2 file, and the sizes of its tables. A GEO1 file has no META section,
 // so for one the fields from BuildTime to DistinctRecords are zero.
@@ -179,8 +273,13 @@ type Metadata struct {
 	SourceTime time.Time
 	// SourceType names the source database, e.g. "GeoIP2-City".
 	SourceType string
-	// Language is the language of the localized names, e.g. "en".
+	// Language is the primary language of the localized names, e.g. "en":
+	// the one Lookup uses unless another is chosen, and the fallback for a
+	// name missing in another language.
 	Language string
+	// Reader.Languages lists every language of the names.
+	// Fields is the database's optional field sets.
+	Fields FieldSet
 	// Description is free text; it may be empty.
 	Description string
 	// Builder names the program that built the file, e.g. "ip2geo/v0.2.0".

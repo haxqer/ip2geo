@@ -68,6 +68,9 @@ func parseGEO2(b []byte, skipCRC bool) (*geo2, error) {
 		return nil, headerError(b, err)
 	}
 	g := &geo2{hdr: h}
+	if h.Profile == format.ProfileASN { // TODO(phase3): read ASN databases
+		return nil, fmt.Errorf("ip2geo: ASN databases are not supported yet: %w", ErrUnsupportedVersion)
+	}
 	if err := g.checkDirectory(b); err != nil {
 		return nil, err
 	}

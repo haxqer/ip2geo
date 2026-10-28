@@ -43,7 +43,7 @@ then          Sections, each starting at a multiple of 8, zero-padded
 |--:|---|---|---|
 | 0 | 4 bytes | magic | `"GEO2"` |
 | 4 | u8 | version | 2 |
-| 5 | u8 | profile | 0 country, 1 region, 2 city |
+| 5 | u8 | profile | 0 country, 1 region, 2 city, 3 ASN (revision 2.1) |
 | 6 | u8 | latScale | 0..7; coordinates are `int32(round(deg × 10^latScale))` |
 | 7 | u8 | idWidth | bytes per record id in V4IDS and V6IDS: 1, 2, 3 or 4 |
 | 8 | u32 | sectionCount | number of directory entries |
@@ -82,6 +82,9 @@ sections without a version bump.
 | 9 | V6IDS | `nV6 × idWidth` bytes, record id per IPv6 boundary |
 | 10 | V6EXCIDX | `u32[nExc]`, indices into V6STARTS whose low 64 bits are non-zero |
 | 11 | V6EXCLO | `u64[nExc]`, those low 64 bits, same order |
+| 12 | XFIELDS | revision 2.1, optional: `u32` field set bits, `u32` reserved (0) |
+| 13 | XRECORDS | revision 2.1, optional: `nRecords × xWidth` bytes, extension fields per record |
+| 14 | LANGS | revision 2.1, optional: `u32[nLangs]` string ids of the name languages |
 
 Counts are derived from section lengths: `nStrings = len(STRIDX)/4 − 1`,
 `nRecords = len(RECORDS)/recordWidth`, `nV4 = len(V4STARTS)/2`,
@@ -125,6 +128,7 @@ all zero, so it is reported as found (parity with maxminddb's `Found()`).
 | country | 10 | u16 countryISO, u16 countryName, u16 continent, u32 countryGeoNameID |
 | region | 14 | country fields, then u16 regionISO, u16 regionName |
 | city | 33 | region fields, then u24 cityName, u32 cityGeoNameID, i32 latitude, i32 longitude, u16 accuracyRadius, u16 timeZone |
+| ASN (2.1) | 7 | u32 number, u24 organization |
 
 `countryISO`, `countryName`, `continent`, `regionISO`, `regionName`,
 `cityName` and `timeZone` are string ids. Latitude and longitude are
@@ -206,6 +210,88 @@ the file size, when any of the following fails:
 Lookups never allocate and never return memory that aliases the file: the
 reader copies STRBLOB to its heap at open and builds its string table over
 that copy.
+
+## Revision 2.1: extension fields, languages, ASN (ip2geo v0.3)
+
+Revision 2.1 adds three optional sections and the ASN profile. The version
+byte stays 2. A file built with no extension field set and one language
+has none of the new sections and is byte-for-byte a revision 2.0 file, so
+the default builds keep their v0.2 sizes. A revision 2.0 reader ignores
+XFIELDS, XRECORDS and LANGS as unknown sections and reads the base records
+correctly; it rejects profile 3.
+
+### Extension records
+
+XFIELDS (8 bytes) is a `u32` of field set bits and a `u32` reserved, zero.
+XRECORDS holds one entry of `xWidth` bytes per record, indexed by record
+id like RECORDS, so `len(XRECORDS) == nRecords × xWidth`. Entry 0 is all
+zero. Two records whose base fields are equal but whose extension fields
+differ are distinct records, so RECORDS may hold duplicate entries.
+
+An entry is the blocks of the field sets present, in bit order, followed
+by the names of the extra languages (below). All string ids in XRECORDS
+are u24, geoname ids u32, metro code u16; flag bits not listed must be 0.
+
+| bit | set | width | block, offsets in bytes |
+|--:|---|--:|---|
+| 0 | EU | 1 | u8 flags @0: bit 0 `country.is_in_european_union` |
+| 1 | continent | 7 | u24 continent name @0, u32 continent geoname id @3 |
+| 2 | registered | 24 | registered_country: u24 ISO @0, u24 name @3, u32 geoname id @6; represented_country: u24 ISO @10, u24 name @13, u32 geoname id @16, u24 type @20; u8 flags @23: bit 0 registered EU, bit 1 represented EU |
+| 3 | subdivisions | 14 | u32 geoname id of the first subdivision @0; second subdivision: u24 ISO @4, u24 name @7, u32 geoname id @10 |
+| 4 | postal | 3 | u24 postal code @0 |
+| 5 | metro | 2 | u16 `location.metro_code` @0 |
+| 6 | traits | 1 | u8 flags @0: bit 0 `is_anycast`, bit 1 `is_anonymous_proxy`, bit 2 `is_satellite_provider` |
+| 7 | location | 1 | u8 flags @0: bit 0 latitude and longitude present, bit 1 accuracy radius present |
+
+Allowed sets by profile: every set except subdivisions, postal, metro and
+location for country; every set except postal, metro and location for
+region; all for city; none for ASN. The first subdivision's ISO code and
+name are the base record's regionISO and regionName. A source with more
+than two subdivisions keeps the first two.
+
+### Languages
+
+LANGS lists `nLangs >= 2` string ids, each a distinct non-empty string.
+`LANGS[0]` is the primary language and equals META.language; the base
+record and the extension blocks hold names in it. A file with one language
+has no LANGS section.
+
+For each extra language `j = 1 .. nLangs−1`, in order, an XRECORDS entry
+ends with one u24 string id per name kind the file stores, in this order:
+country name, region name (profile ≥ region), city name (city),
+continent name (continent set), second subdivision name (subdivisions
+set), registered country name and represented country name (registered
+set). The block of language `j` starts at
+`xWidthBlocks + (j−1) × 3 × kinds`, where `xWidthBlocks` is the sum of the
+set widths. Id 0 (the empty string) means the source has no name in that
+language; a reader then returns the primary language's name (fallback).
+
+XFIELDS and XRECORDS are both present or both absent. They are present
+when the field set bits are non-zero or LANGS is present (the bits may be
+0 when only languages are stored).
+
+### ASN records
+
+Profile 3 records are 7 bytes: u32 autonomous system number, u24
+organization string id. Record 0 is all zero (not covered). An ASN file has
+latScale 0 and no XFIELDS, XRECORDS or LANGS.
+
+### Reader requirements (revision 2.1)
+
+In addition to rules 1–8, a revision 2.1 reader rejects a file when:
+
+9. XFIELDS is not 8 bytes, its reserved word is non-zero, or it has a bit
+   outside 0–7 (reported as an unsupported version: a newer field set);
+   or its bits are not allowed for the profile;
+10. exactly one of XFIELDS and XRECORDS is present, or LANGS is present
+    without them, or any of the three appears in an ASN file, or one of
+    them appears more than once;
+11. `len(XRECORDS) != nRecords × xWidth`, entry 0 is not all zero, a string
+    id is `>= nStrings`, or an undefined flag bit is set;
+12. LANGS has fewer than 2 entries, an id `>= nStrings`, an empty or
+    repeated language, or `LANGS[0] != META.language`;
+13. for an ASN file: `nRecords` and ids as in rule 6, and every
+    organization id `< nStrings`.
 
 ## Metadata exposed by the Go reader
 

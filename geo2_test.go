@@ -309,7 +309,7 @@ func g2corruptions() []g2case {
 		{name: "magic case", mut: func(f *g2file) { f.magic = "geo2" }, want: ErrBadMagic},
 		{name: "version 1", mut: func(f *g2file) { f.version = 1 }, want: ErrUnsupportedVersion},
 		{name: "version 3", mut: func(f *g2file) { f.version = 3 }, want: ErrUnsupportedVersion},
-		{name: "profile 3", mut: func(f *g2file) { f.profile = 3 }, msg: "profile"},
+		{name: "profile 4", mut: func(f *g2file) { f.profile = 4 }, msg: "profile"},
 		{name: "lat scale 8", mut: func(f *g2file) { f.latScale = 8 }, msg: "lat/lon scale"},
 		{name: "id width 0", mut: func(f *g2file) { f.idWidth = 0 }, msg: "id width"},
 		{name: "id width 5", mut: func(f *g2file) { f.idWidth = 5 }, msg: "id width"},

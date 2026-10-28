@@ -22,7 +22,7 @@ func TestHeaderRoundTrip(t *testing.T) {
 	}{
 		{"magic", func(b []byte) { b[0] = 'X' }, ErrMagic},
 		{"version", func(b []byte) { b[4] = 1 }, ErrVersion},
-		{"profile", func(b []byte) { b[5] = 3 }, ErrHeader},
+		{"profile", func(b []byte) { b[5] = 4 }, ErrHeader},
 		{"latscale", func(b []byte) { b[6] = 8 }, ErrHeader},
 		{"idwidth0", func(b []byte) { b[7] = 0 }, ErrHeader},
 		{"idwidth5", func(b []byte) { b[7] = 5 }, ErrHeader},
@@ -79,7 +79,7 @@ func TestWidths(t *testing.T) {
 			t.Errorf("IDWidth(%d) = %d, want %d", n, got, want)
 		}
 	}
-	if RecordWidth(0) != 10 || RecordWidth(1) != 14 || RecordWidth(2) != 33 || RecordWidth(3) != 0 {
+	if RecordWidth(0) != 10 || RecordWidth(1) != 14 || RecordWidth(2) != 33 || RecordWidth(3) != 7 || RecordWidth(4) != 0 {
 		t.Error("RecordWidth")
 	}
 	if RecTimeZone+2 != RecWidthCity || RecRegionName+2 != RecWidthRegion || RecCountryGeo+4 != RecWidthCountry {
@@ -128,5 +128,40 @@ func TestChecksum(t *testing.T) {
 	// CRC-32C of "123456789" is the well-known check value 0xE3069283.
 	if got := Checksum([]byte("123456789")); got != 0xE3069283 {
 		t.Errorf("Checksum = %#x, want 0xE3069283", got)
+	}
+}
+
+func TestXLayout(t *testing.T) {
+	l := NewXLayout(2, KnownFields, 3)
+	// blocks 1+7+24+14+3+2+1+1 = 53, then 2 extra languages × 7 kinds × 3.
+	if l.Width != 53+2*7*3 || l.LangOff != 53 || len(l.Kinds) != NumNameKinds {
+		t.Fatalf("city, all fields, 3 langs: %+v", l)
+	}
+	if l.Field[3] != 1+7+24 || l.NameOff(2, NameCity) != 53+21+6 {
+		t.Fatalf("offsets: %+v, city name of lang 2 at %d", l, l.NameOff(2, NameCity))
+	}
+	if l := NewXLayout(0, 0, 1); l.Width != 0 || len(l.Kinds) != 1 {
+		t.Fatalf("country, nothing: %+v", l)
+	}
+	if l := NewXLayout(0, 0, 2); l.Width != 3 || l.NameOff(1, NameRegion) != -1 {
+		t.Fatalf("country, 2 langs: %+v", l)
+	}
+	for _, c := range []struct {
+		p    uint8
+		f    uint32
+		want bool
+	}{
+		{0, FieldEU | FieldRegistered | FieldTraits, true},
+		{0, FieldSubdivisions, false},
+		{1, FieldSubdivisions, true},
+		{1, FieldPostal, false},
+		{2, KnownFields, true},
+		{2, 1 << 8, false},
+		{ProfileASN, FieldEU, false},
+		{ProfileASN, 0, true},
+	} {
+		if got := CheckFields(c.p, c.f); got != c.want {
+			t.Errorf("CheckFields(%d, %#x) = %v", c.p, c.f, got)
+		}
 	}
 }
