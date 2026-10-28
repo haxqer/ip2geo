@@ -55,11 +55,12 @@ func (r *Reader) Ranges() iter.Seq2[Range, Details] {
 func (r *Reader) range4(key uint32) (Range, uint32) {
 	i := r.index4(key)
 	first, last, id := uint32(0), uint32(math.MaxUint32), uint32(0)
+	g := int(key >> 16) // the bucket of both boundaries, most of the time
 	if i >= 0 {
-		first, id = r.start4(i), format.ReadID(r.v4ids, r.idWidth, i)
+		first, id = r.start4(i, g), format.ReadID(r.v4ids, r.idWidth, i)
 	}
 	if i+1 < len(r.v4starts)/2 {
-		last = r.start4(i+1) - 1
+		last = r.start4(i+1, g) - 1
 	}
 	return Range{addr4(first), addr4(last)}, id
 }
@@ -120,9 +121,12 @@ func (r *Reader) index4(key uint32) int {
 
 // start4 returns the absolute start of IPv4 boundary i: its u16 value in
 // the top-16 bucket g with V4IDX[g] <= i < V4IDX[g+1], the last bucket
-// whose first boundary is at or before i.
-func (r *Reader) start4(i int) uint32 {
+// whose first boundary is at or before i. hint is checked first.
+func (r *Reader) start4(i, hint int) uint32 {
 	le := binary.LittleEndian
+	if uint64(le.Uint32(r.v4idx[hint*4:])) <= uint64(i) && uint64(i) < uint64(le.Uint32(r.v4idx[hint*4+4:])) {
+		return uint32(hint)<<16 | uint32(le.Uint16(r.v4starts[i*2:]))
+	}
 	// V4IDX[0] == 0 <= i < V4IDX[65536]: find the first g > 0 with
 	// V4IDX[g] > i.
 	l, h := 1, format.V4IdxEntries-1
