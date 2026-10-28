@@ -1,0 +1,23 @@
+# golangci-lint v2 configuration (golangci-lint 2.x). CI runs it through
+# golangci/golangci-lint-action; locally: golangci-lint run ./...
+version: "2"
+
+linters:
+  # "standard" = errcheck, govet, ineffassign, staticcheck, unused.
+  default: standard
+  enable:
+    - misspell
+  settings:
+    misspell:
+      locale: US
+  exclusions:
+    # Skip the usual false positives, e.g. unchecked errors from fmt.Fprint*,
+    # Close and os.Remove that golangci-lint v1 excluded by default.
+    presets:
+      - std-error-handling
+      - common-false-positives
+
+issues:
+  # Report every finding instead of truncating at 3 per linter / text.
+  max-issues-per-linter: 0
+  max-same-issues: 0

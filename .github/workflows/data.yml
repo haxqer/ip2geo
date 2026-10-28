@@ -1,0 +1,112 @@
+name: Data
+
+# Monthly DB-IP Lite sample databases, published as GitHub Release
+# data-YYYY-MM. All logic lives in scripts/data-release.sh so it can be run
+# locally: scripts/data-release.sh build YYYY-MM out/
+on:
+  schedule:
+    # 06:00 UTC on the 3rd: DB-IP publishes the month's Lite files on the
+    # 1st, which leaves two days of slack.
+    - cron: "0 6 3 * *"
+  workflow_dispatch:
+    inputs:
+      month:
+        description: "DB-IP Lite month to build (YYYY-MM). Empty: the current UTC month."
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+# Never run two publishes at once: the existence check and the create must
+# not interleave.
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    # Publish only from main, even for a manual run started on another branch:
+    # the release tag points at the commit that built it. Scheduled runs
+    # always use the default branch. github.ref is compared instead of
+    # github.event.repository.default_branch so the check does not depend on
+    # what each event's payload carries.
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write # gh release create (creates the data-YYYY-MM tag)
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      GOTOOLCHAIN: local
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false # gh authenticates with GH_TOKEN
+
+      - name: Resolve month
+        id: month
+        env:
+          MONTH_INPUT: ${{ inputs.month }}
+        run: |
+          month="${MONTH_INPUT:-$(date -u +%Y-%m)}"
+          if ! [[ "$month" =~ ^[0-9]{4}-(0[1-9]|1[0-2])$ ]]; then
+            echo "::error::month must be YYYY-MM, got '${month}'"
+            exit 1
+          fi
+          echo "month=${month}" >> "$GITHUB_OUTPUT"
+          echo "Building data-${month}" >> "$GITHUB_STEP_SUMMARY"
+
+      # Idempotent reruns: stop here if data-YYYY-MM is already published.
+      # exists exits 0 (found), 1 (not found) or 2 (API error -> fail).
+      - name: Check for an existing release
+        id: existing
+        env:
+          MONTH: ${{ steps.month.outputs.month }}
+        run: |
+          rc=0
+          scripts/data-release.sh exists "$MONTH" || rc=$?
+          case "$rc" in
+            0) echo "exists=true" >> "$GITHUB_OUTPUT"
+               echo "Release data-${MONTH} already exists; nothing to do." >> "$GITHUB_STEP_SUMMARY" ;;
+            1) echo "exists=false" >> "$GITHUB_OUTPUT" ;;
+            *) exit "$rc" ;;
+          esac
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        if: steps.existing.outputs.exists == 'false'
+        with:
+          go-version: stable
+          cache: false # this job publishes; do not restore caches written by other runs
+
+      # Download dbip-city-lite-YYYY-MM.mmdb.gz (fails clearly on a 404),
+      # build the country/region/city .geoc files, gzip -9 them, write
+      # ATTRIBUTION.txt and checksums.txt.
+      - name: Build
+        if: steps.existing.outputs.exists == 'false'
+        env:
+          MONTH: ${{ steps.month.outputs.month }}
+        run: scripts/data-release.sh build "$MONTH" "$RUNNER_TEMP/data"
+
+      # Gate on the builder agreeing with this month's source before publishing.
+      - name: Verify against the source
+        if: steps.existing.outputs.exists == 'false'
+        env:
+          MONTH: ${{ steps.month.outputs.month }}
+        run: scripts/data-release.sh verify "$MONTH" "$RUNNER_TEMP/data"
+
+      - name: Publish
+        if: steps.existing.outputs.exists == 'false'
+        env:
+          MONTH: ${{ steps.month.outputs.month }}
+        run: |
+          scripts/data-release.sh publish "$MONTH" "$RUNNER_TEMP/data"
+          {
+            echo "Published [data-${MONTH}](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/releases/tag/data-${MONTH})"
+            echo
+            echo '```'
+            cat "$RUNNER_TEMP/data/checksums.txt"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

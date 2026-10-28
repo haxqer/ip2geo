@@ -1,0 +1,60 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+# GoReleaser creates the GitHub Release and uploads the archives.
+permissions:
+  contents: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  goreleaser:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Full history and tags: GoReleaser builds the changelog from the
+          # commits since the previous v* tag.
+          fetch-depth: 0
+          persist-credentials: false # GoReleaser talks to the API with GITHUB_TOKEN, not git push
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          # Release binaries are built with the latest stable Go so they carry
+          # every standard-library security fix; go.mod still sets 1.25 as the
+          # minimum for library users.
+          go-version: stable
+          # No cache in a job that holds contents: write and publishes binaries.
+          cache: false
+
+      # Fail before anything is published if the tag has no CHANGELOG entry
+      # (Keep a Changelog heading "## [X.Y.Z] - YYYY-MM-DD").
+      - name: Check CHANGELOG entry
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          version="${TAG#v}"
+          if ! grep -Eq "^## \[${version//./\\.}\] - [0-9]{4}-[0-9]{2}-[0-9]{2}\$" CHANGELOG.md; then
+            echo "::error file=CHANGELOG.md::missing '## [${version}] - YYYY-MM-DD' section for tag ${TAG}"
+            exit 1
+          fi
+
+      - name: go test
+        run: go test ./...
+
+      - uses: goreleaser/goreleaser-action@a4f02ab5355a589de60d917a659ce617ed19b3de # v7.3.0
+        with:
+          distribution: goreleaser
+          version: v2.19.0 # pinned GoReleaser release; .goreleaser.yaml uses the v2 schema
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Name the tag explicitly: monthly data-YYYY-MM tags can point at the
+          # same commit as a v* tag.
+          GORELEASER_CURRENT_TAG: ${{ github.ref_name }}

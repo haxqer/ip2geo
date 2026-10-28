@@ -1,0 +1,65 @@
+name: Fuzz
+
+on:
+  schedule:
+    - cron: "23 4 * * 1" # weekly, Monday 04:23 UTC (off the hour to dodge the cron rush)
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  fuzz:
+    name: ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30 # 10 min of fuzzing plus build, corpus replay and upload
+    strategy:
+      fail-fast: false
+      matrix:
+        # Fuzz targets in the root package; the names must match exactly.
+        target: [FuzzOpenBytes, FuzzLookup]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: stable
+          cache: true
+
+      # Carry the generated corpus ($GOCACHE/fuzz) from one weekly run to the
+      # next so each run starts where the last one stopped. A unique key per
+      # run plus a prefix restore-key always restores the newest corpus.
+      - name: Locate fuzz corpus cache
+        id: corpus
+        run: echo "dir=$(go env GOCACHE)/fuzz" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ steps.corpus.outputs.dir }}
+          key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}
+          restore-keys: fuzz-corpus-${{ matrix.target }}-
+
+      # The -fuzz pattern is anchored: go test refuses to fuzz when the regexp
+      # matches more than one target, so a future FuzzLookupXxx must not break
+      # the FuzzLookup job.
+      - name: go test -fuzz
+        env:
+          TARGET: ${{ matrix.target }}
+        run: go test -run '^$' -fuzz="^${TARGET}\$" -fuzztime=10m ./
+
+      # A crash writes the minimised input to testdata/fuzz/<Target>/; upload it
+      # so it can be committed as a regression seed.
+      - name: Upload failing inputs
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: fuzz-crashers-${{ matrix.target }}
+          path: testdata/fuzz/**
+          if-no-files-found: warn
+          retention-days: 30

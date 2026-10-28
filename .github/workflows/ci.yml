@@ -5,17 +5,191 @@ on:
     branches: [main]
   pull_request:
 
+# Least privilege: every job only reads the repository.
+permissions:
+  contents: read
+
+# A new push to a PR supersedes the previous run; runs on main are never
+# cancelled so every commit on main keeps its own result.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  # Never let the go command download a newer toolchain. Without this, the
+  # 1.25.x matrix entry would silently switch toolchains if a dependency ever
+  # raised the go directive, and stop proving that go.mod's `go 1.25.0` minimum
+  # still builds.
+  GOTOOLCHAIN: local
+
 jobs:
   test:
+    name: test (Go ${{ matrix.go }})
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        # 1.25.x is the minimum declared in go.mod; stable is the latest release.
+        go: ["1.25.x", "stable"]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          go-version: "1.25"
-      - name: Build
-        run: go build ./...
-      - name: Vet
+          persist-credentials: false
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: ${{ matrix.go }}
+          cache: true # module + build cache, keyed on go.sum
+
+      - name: gofmt
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "::error::gofmt found unformatted files; run 'gofmt -w .'"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: go vet
         run: go vet ./...
-      - name: Test
+
+      - name: go build
+        run: go build ./...
+
+      # The mmdb integration tests skip here (IP2GEO_TEST_MMDB unset); they run
+      # in the integration job below without -race.
+      - name: go test -race
         run: go test -race ./...
+
+      # 32-bit build of the hermetic reader tests: catches size arithmetic that
+      # overflows int on 386. -race is not supported on 386.
+      - name: go test (GOARCH=386, root package)
+        if: matrix.go == 'stable'
+        env:
+          GOARCH: "386"
+        run: go test ./
+
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: stable
+
+      # Configuration lives in .golangci.yml (v2 format). The action verifies
+      # the config against the schema before running.
+      - uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
+        with:
+          version: v2.15.0
+
+  vuln:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Scans with the latest stable Go on purpose: an end-of-life 1.25.x patch
+      # release would keep reporting standard-library vulnerabilities that only
+      # a newer toolchain fixes, turning this job permanently red.
+      - uses: golang/govulncheck-action@032d45514ae346b1db93c04b0c90b841c370344f # v1.1.0
+        with:
+          repo-checkout: false # already checked out above, without persisted credentials
+          go-version-input: stable
+          go-package: ./...
+
+  # Runs the mmdb integration tests against DB-IP IP-to-City Lite (CC BY 4.0).
+  # The database is only used as test input: nothing built here is uploaded or
+  # published, so the attribution requirement does not come into play. The
+  # monthly data.yml workflow is the only place that publishes derived files.
+  integration:
+    name: integration (DB-IP Lite)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: stable
+          cache: true
+
+      # DB-IP publishes the new month early in the month; until then the
+      # current month's file is a 404, so fall back to the previous month.
+      - name: Pick DB-IP Lite month
+        id: dbip
+        run: |
+          month="$(date -u +%Y-%m)"
+          url="https://download.db-ip.com/free/dbip-city-lite-${month}.mmdb.gz"
+          if ! curl -fsSIL --retry 2 -o /dev/null "$url"; then
+            prev="$(date -u -d "$(date -u +%Y-%m-01) -1 month" +%Y-%m)"
+            echo "::notice::${url} is not available yet; using ${prev}"
+            month="$prev"
+          fi
+          {
+            echo "month=${month}"
+            echo "dir=${RUNNER_TEMP}/dbip"
+            echo "gz=${RUNNER_TEMP}/dbip/dbip-city-lite-${month}.mmdb.gz"
+          } >> "$GITHUB_OUTPUT"
+
+      # restore/save are split so the download is cached even when the tests
+      # fail (a plain actions/cache only saves after a successful job).
+      - name: Restore DB-IP Lite from cache
+        id: cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ steps.dbip.outputs.dir }}
+          key: dbip-city-lite-${{ steps.dbip.outputs.month }}
+
+      - name: Download DB-IP Lite
+        if: steps.cache.outputs.cache-hit != 'true'
+        env:
+          MONTH: ${{ steps.dbip.outputs.month }}
+          DIR: ${{ steps.dbip.outputs.dir }}
+          GZ: ${{ steps.dbip.outputs.gz }}
+        run: |
+          mkdir -p "$DIR"
+          curl -fsSL --retry 3 --retry-delay 5 -o "$GZ" \
+            "https://download.db-ip.com/free/dbip-city-lite-${MONTH}.mmdb.gz"
+          gzip -t "$GZ"
+          ls -l "$GZ"
+
+      - name: Save DB-IP Lite to cache
+        if: steps.cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ steps.dbip.outputs.dir }}
+          key: ${{ steps.cache.outputs.cache-primary-key }}
+
+      - name: Decompress
+        env:
+          GZ: ${{ steps.dbip.outputs.gz }}
+        run: gunzip -c "$GZ" > "${RUNNER_TEMP}/dbip-city-lite.mmdb"
+
+      # No -race: the race detector inflates the ~26 s City build so much that
+      # the two tests took 743 s, past go test's 600 s default timeout. The
+      # race detector stays on the hermetic tests in the test job. -count=1
+      # keeps a cached result from standing in for a real run.
+      - name: Integration tests
+        env:
+          IP2GEO_TEST_MMDB: ${{ runner.temp }}/dbip-city-lite.mmdb
+        run: |
+          test -s "$IP2GEO_TEST_MMDB"
+          go test -v -count=1 -timeout 30m -run 'TestBuildMatchesSource|TestOpenInMemory|TestRegisteredCountryOnly' ./mmdb/
+
+      # Lookup ns/op and allocs/op per profile for IPv4 and IPv6 on the same
+      # database. No -race. Shared runners are noisy, so the numbers are for
+      # reading, not a gate; only a failure to build or run fails the step.
+      - name: Lookup benchmark
+        env:
+          IP2GEO_TEST_MMDB: ${{ runner.temp }}/dbip-city-lite.mmdb
+        run: go test -run '^$' -bench BenchmarkLookup -benchtime=2s ./mmdb/
