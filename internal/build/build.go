@@ -103,21 +103,21 @@ func (o *Options) Normalize() error {
 		o.Fields = allowedFields(o.Profile)
 	} else if !format.CheckFields(uint8(o.Profile), uint32(o.Fields)) {
 		bad := o.Fields &^ allowedFields(o.Profile)
-		return fmt.Errorf("Fields %#x: field sets %#x are not allowed with profile %s: %w",
+		return fmt.Errorf("option Fields %#x: field sets %#x are not allowed with profile %s: %w",
 			uint32(o.Fields), uint32(bad), o.Profile, ErrOptions)
 	}
 	seen := make(map[string]bool, len(o.Languages))
 	for _, l := range o.Languages {
 		switch {
 		case l == "":
-			return fmt.Errorf("Languages %q: empty language: %w", o.Languages, ErrOptions)
+			return fmt.Errorf("option Languages %q: empty language: %w", o.Languages, ErrOptions)
 		case seen[l]:
-			return fmt.Errorf("Languages %q: %q is listed twice: %w", o.Languages, l, ErrOptions)
+			return fmt.Errorf("option Languages %q: %q is listed twice: %w", o.Languages, l, ErrOptions)
 		}
 		seen[l] = true
 	}
 	if o.Profile == ip2geo.ProfileASN && len(o.Languages) > 1 {
-		return fmt.Errorf("Languages %q: profile asn has no names, so at most one language: %w", o.Languages, ErrOptions)
+		return fmt.Errorf("option Languages %q: profile asn has no names, so at most one language: %w", o.Languages, ErrOptions)
 	}
 	if o.LatScale > MaxLatScale {
 		return fmt.Errorf("LatScale %d is above %d (coordinates would overflow int32): %w",
@@ -131,10 +131,10 @@ func (o *Options) Normalize() error {
 	}
 	o.BuildTime = o.BuildTime.UTC().Truncate(time.Second)
 	if len(o.Description) > math.MaxUint16 {
-		return fmt.Errorf("Description is %d bytes, more than %d: %w", len(o.Description), math.MaxUint16, ErrOptions)
+		return fmt.Errorf("option Description is %d bytes, more than %d: %w", len(o.Description), math.MaxUint16, ErrOptions)
 	}
 	if !utf8.ValidString(o.Description) {
-		return fmt.Errorf("Description %.40q is not valid UTF-8: %w", o.Description, ErrOptions)
+		return fmt.Errorf("option Description %.40q is not valid UTF-8: %w", o.Description, ErrOptions)
 	}
 	if len(o.Languages) == 0 {
 		o.Languages = []string{"en"}

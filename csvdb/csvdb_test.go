@@ -386,8 +386,12 @@ func TestUnreadColumns(t *testing.T) {
 func TestGzip(t *testing.T) {
 	var buf bytes.Buffer
 	zw := gzip.NewWriter(&buf)
-	zw.Write([]byte(dbipCity))
-	zw.Close()
+	if _, err := zw.Write([]byte(dbipCity)); err != nil {
+		t.Fatal(err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
 	plain := write(t, "dbip-city-lite.csv", dbipCity)
 	gz := write(t, "dbip-city-lite.csv.gz", buf.String())
 	opts := csvdb.Options{Format: csvdb.DBIPCity, Profile: ip2geo.ProfileCity, BuildTime: time.Unix(1e9, 0)}

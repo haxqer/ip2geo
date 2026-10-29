@@ -19,7 +19,7 @@ const (
 	// (dbip-country-lite-*.csv): ip_start, ip_end, country.
 	DBIPCountry
 	// DBIPASN is DB-IP's IP to ASN Lite CSV (dbip-asn-lite-*.csv):
-	// ip_start, ip_end, as_number, as_organisation.
+	// ip_start, ip_end, as_number, as_organization.
 	DBIPASN
 	// IP2Location is an IP2Location DB1, DB3, DB5, DB9 or DB11 CSV (LITE
 	// or commercial), told apart by the number of columns of the first

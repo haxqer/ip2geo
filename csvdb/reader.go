@@ -48,8 +48,8 @@ func newReader(sc *scanner, l *layout, b *build.Builder) *reader {
 			}
 		}
 	}
-	switch {
-	case o.Profile == ip2geo.ProfileASN:
+	switch o.Profile {
+	case ip2geo.ProfileASN:
 		add(l.asNum, l.asOrg)
 	default:
 		add(l.continent, l.country, l.countryName)

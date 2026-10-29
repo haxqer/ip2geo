@@ -324,7 +324,7 @@ func u32(v uint32) [4]byte { return [4]byte{byte(v >> 24), byte(v >> 16), byte(v
 
 // sampleRows reads the CSV with encoding/csv, independently of csvdb, and
 // returns the first and last address of about 20,000 random rows, each
-// with its neighbours, and for the sampled IPv6 rows a function that
+// with its neighbors, and for the sampled IPv6 rows a function that
 // returns a random address inside the row.
 func sampleRows(t *testing.T, path string, rng *rand.Rand) ([]netip.Addr, []func(*rand.Rand) netip.Addr) {
 	file, err := os.Open(path)
