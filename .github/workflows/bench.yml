@@ -29,6 +29,8 @@ env:
   # p below ALPHA, fails the job.
   MAX_SLOWDOWN: "10"
   ALPHA: "0.05"
+  # Interleaved benchmark rounds: samples per benchmark and side.
+  ROUNDS: "10"
 
 jobs:
   lookup:
@@ -133,26 +135,42 @@ jobs:
         if: steps.base.outputs.tag != ''
         run: GOBIN="${RUNNER_TEMP}/bin" go install "$BENCHSTAT"
 
-      # The previous release first, then this commit, on the same runner.
-      # -count=6 gives benchstat six samples per benchmark for its
-      # significance test. No -race.
-      - name: Benchmark the previous release
+      # Interleaved rounds on one runner: each round runs the previous
+      # release and this commit once (-test.count=1), alternating which goes
+      # first. Running all of one side before the other let drift on the
+      # shared runner land on one side only: the same code measured city
+      # IPv4 Lookup 4% faster on one run and 45% slower on the next. Each
+      # side's test binary is compiled once; every round is a new process
+      # that builds its readers afresh, so their memory placement varies
+      # alike on both sides. ROUNDS gives benchstat that many samples per
+      # benchmark for its significance test. No -race.
+      - name: Benchmark the previous release and this commit
         if: steps.base.outputs.tag != ''
         env:
           IP2GEO_TEST_MMDB: ${{ runner.temp }}/dbip-city-lite.mmdb
         run: |
           test -s "$IP2GEO_TEST_MMDB"
-          cd "${RUNNER_TEMP}/base"
-          go test -run '^$' -bench BenchmarkLookup -benchtime=1s -count=6 -timeout 30m ./mmdb/ |
-            tee "${RUNNER_TEMP}/base.txt"
-
-      - name: Benchmark this commit
-        if: steps.base.outputs.tag != ''
-        env:
-          IP2GEO_TEST_MMDB: ${{ runner.temp }}/dbip-city-lite.mmdb
-        run: |
-          go test -run '^$' -bench BenchmarkLookup -benchtime=1s -count=6 -timeout 30m ./mmdb/ |
-            tee "${RUNNER_TEMP}/head.txt"
+          (cd "${RUNNER_TEMP}/base" && go test -c -o "${RUNNER_TEMP}/base.test" ./mmdb/)
+          go test -c -o "${RUNNER_TEMP}/head.test" ./mmdb/
+          # Run from each package directory, as go test would.
+          bench() {
+            local side=$1 dir=$2
+            (cd "$dir" && "${RUNNER_TEMP}/${side}.test" -test.run '^$' -test.bench BenchmarkLookup \
+              -test.benchtime=1s -test.count=1 -test.timeout 10m) | tee -a "${RUNNER_TEMP}/${side}.txt"
+          }
+          : > "${RUNNER_TEMP}/base.txt"
+          : > "${RUNNER_TEMP}/head.txt"
+          for ((i = 1; i <= ROUNDS; i++)); do
+            echo "::group::round ${i} of ${ROUNDS}"
+            if ((i % 2)); then
+              bench base "${RUNNER_TEMP}/base/mmdb"
+              bench head "${GITHUB_WORKSPACE}/mmdb"
+            else
+              bench head "${GITHUB_WORKSPACE}/mmdb"
+              bench base "${RUNNER_TEMP}/base/mmdb"
+            fi
+            echo "::endgroup::"
+          done
 
       # benchstat's CSV has one table per unit. In the sec/op table, column 6
       # is the change ("+12.34%", or "~" when not significant) and column 7
@@ -187,7 +205,7 @@ jobs:
           {
             echo "### Lookup: ${TAG} vs this commit"
             echo
-            echo "DB-IP IP-to-City Lite ${MONTH}, \`-benchtime=1s -count=6\`, both on this runner."
+            echo "DB-IP IP-to-City Lite ${MONTH}, \`-benchtime=1s\`, ${ROUNDS} interleaved rounds on this runner."
             echo "The job fails when a \`Lookup/\` row is more than ${MAX_SLOWDOWN}% slower with p < ${ALPHA}."
             echo
             echo '```'
