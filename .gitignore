@@ -5,6 +5,9 @@
 # build artifacts
 /ip2geo
 /bench/bench
+# GoReleaser output; untracked files here would stamp release binaries
+# "+dirty" (vcs.modified=true)
+/dist/
 
 # editor / OS cruft
 .DS_Store
