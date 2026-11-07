@@ -6,6 +6,36 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+- A copy of a memory-mapped `Reader` (`c := *db`) no longer crashes once the
+  original `*Reader` is unreachable: the mapping is now released only when
+  every copy and every `WithLanguage` view of the Reader is unreachable.
+- `ip2geo lookup` escapes every string from the database (country, region,
+  city, time zone and the optional fields), so a crafted source cannot write
+  terminal control sequences.
+- `ip2geo lookup` reports an address that does not parse on stderr and exits
+  with status 1; the other addresses are still looked up.
+- `ip2geo lookup` prints only what the database's profile keeps: no
+  `(0.0000, 0.0000)` coordinates for country and region databases, no
+  coordinates when the location field set says the source has none, no
+  trailing space without a time zone, and no empty parts in the optional
+  field lines. A city record with every field prints as before.
+- `ip2geo build -out` defaults to `<profile>.geoc` (for example `asn.geoc`)
+  instead of always `city.geoc`.
+- A city build fails on a source latitude outside [-90, 90] or longitude
+  outside [-180, 180], NaN and infinities included, from `.mmdb` sources as
+  already from CSV; before, the stored value depended on the architecture of
+  the building machine.
+- A build fails on a network `::/n` with n < 96, whose data no IPv4 lookup
+  would find.
+- `mmdb.Build` and `csvdb.Build` load the built database before replacing the
+  output and write nothing if it does not load or is over the 2 GiB limit of
+  the format; the atomic write also syncs the directory on Unix.
+- Builder errors for a missing language match `errors.Is(err,
+  ip2geo.ErrLanguage)`.
+- The monthly data workflow checks the built files with the latest released
+  CLI before publishing them.
+
 ## [0.3.0] - 2026-10-29
 
 ### Added

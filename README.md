@@ -48,8 +48,8 @@ redistributable [DB-IP IP-to-City Lite](https://db-ip.com/db/download/ip-to-city
 dataset and start looking up addresses immediately:
 
 ```sh
-# pick one: country (1.7 MB), region (11 MB), or city (32 MB)
-curl -LO https://github.com/haxqer/ip2geo/releases/download/data-2026-10/dbip-city-lite.geoc.gz
+# pick one: country (1.1 MB), region (7.4 MB), or city (24 MB)
+curl -LO https://github.com/haxqer/ip2geo/releases/download/data-2026-11/dbip-city-lite.geoc.gz
 gunzip dbip-city-lite.geoc.gz
 
 go run github.com/haxqer/ip2geo/cmd/ip2geo@latest lookup -db dbip-city-lite.geoc 8.8.8.8
@@ -57,9 +57,10 @@ go run github.com/haxqer/ip2geo/cmd/ip2geo@latest lookup -db dbip-city-lite.geoc
 ```
 
 These `.geoc` files load with **zero third-party dependencies** via
-`ip2geo.Open`. The `data-2026-10` files are in the v0.1 format and still
-load; the monthly releases from `data-2026-11` on are GEO2 files (the city
-file uncompressed: about 86 MB instead of 142 MB). Browse every build on the
+`ip2geo.Open`. The monthly releases from `data-2026-11` on are GEO2 files
+(the city file uncompressed: about 86 MB instead of 142 MB) and need ip2geo
+v0.2.0 or later; the older `data-2026-10` files are in the v0.1 format and
+still load. Browse every build on the
 [data releases](https://github.com/haxqer/ip2geo/releases) page.
 IP geolocation by [DB-IP](https://db-ip.com), licensed under CC BY 4.0.
 
