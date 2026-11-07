@@ -394,7 +394,7 @@ func TestViewKeepsMapping(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if !r.mapped {
+		if r.m == nil {
 			t.Fatal("the Reader is not mapped")
 		}
 		v, err := r.WithLanguage("de")

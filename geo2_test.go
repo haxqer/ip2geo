@@ -809,8 +809,8 @@ func TestOpenGEO2(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if r.mapped != c.mapped {
-				t.Errorf("mapped = %v, want %v", r.mapped, c.mapped)
+			if mapped := r.m != nil; mapped != c.mapped {
+				t.Errorf("mapped = %v, want %v", mapped, c.mapped)
 			}
 			for _, a := range probeAddrs(d, 3, 500) {
 				want, wok := d.lookup(a)
@@ -833,7 +833,7 @@ func TestOpenGEO2(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if r.mapped {
+	if r.m != nil {
 		t.Error("a GEO1 Reader is mapped")
 	}
 
@@ -911,7 +911,7 @@ func TestMappingReleased(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if !r.mapped {
+		if r.m == nil {
 			t.Fatal("the Reader is not mapped")
 		}
 		if _, ok := r.Lookup(netip.MustParseAddr("10.0.0.5")); !ok {

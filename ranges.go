@@ -34,7 +34,7 @@ func (r *Reader) LookupRange(ip netip.Addr) (Range, bool) {
 			rg, id = r.range6(binary.BigEndian.Uint64(a[:8]), binary.BigEndian.Uint64(a[8:]))
 		}
 	}
-	runtime.KeepAlive(r)
+	runtime.KeepAlive(r.m)
 	return rg, id != 0
 }
 
@@ -47,7 +47,7 @@ func (r *Reader) LookupRange(ip netip.Addr) (Range, bool) {
 func (r *Reader) Ranges() iter.Seq2[Range, Details] {
 	return func(yield func(Range, Details) bool) {
 		_ = r.ranges4(yield) && r.ranges6(yield)
-		runtime.KeepAlive(r)
+		runtime.KeepAlive(r.m)
 	}
 }
 

@@ -28,7 +28,8 @@
 // file's own sections. Only the strings are copied to the Go heap, so a
 // returned Record never refers to the mapping, plus a few small indexes
 // built at open. The mapping is released by the garbage collector once the
-// Reader is unreachable. A GEO1 file (version 1, written by v0.1.x) is
+// Reader, every copy of it and every Reader WithLanguage made from it is
+// unreachable. A GEO1 file (version 1, written by v0.1.x) is
 // converted at open into the same layout on the Go heap and its mapping is
 // released straight away.
 //
@@ -296,9 +297,9 @@ type Metadata struct {
 	SourceType string
 	// Language is the primary language of the localized names, e.g. "en":
 	// the one Lookup uses unless another is chosen, and the fallback for a
-	// name missing in another language.
+	// name missing in another language. Reader.Languages lists every
+	// language of the names.
 	Language string
-	// Reader.Languages lists every language of the names.
 	// Fields is the database's optional field sets.
 	Fields FieldSet
 	// Description is free text; it may be empty.

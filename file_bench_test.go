@@ -127,7 +127,7 @@ func BenchmarkLookupFile(b *testing.B) {
 		if err != nil {
 			b.Fatal(err)
 		}
-		b.Logf("GEO2 re-encoding: %d bytes, mapped=%v", len(g2), r2.mapped)
+		b.Logf("GEO2 re-encoding: %d bytes, mapped=%v", len(g2), r2.m != nil)
 		readers = append(readers, struct {
 			name string
 			r    *Reader

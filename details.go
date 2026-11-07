@@ -26,14 +26,11 @@ func (r *Reader) Fields() FieldSet { return r.fields }
 // It fails with an error wrapping ErrLanguage when the database does not
 // have lang.
 func (r *Reader) WithLanguage(lang string) (*Reader, error) {
+	// The view shares r's mapping, if any, which stays until both are
+	// unreachable.
 	v := *r
 	if err := v.setLanguage(lang); err != nil {
 		return nil, err
-	}
-	// The view's tables may be in r's mapping, which r's cleanup releases:
-	// the view refers to that Reader so that it stays reachable.
-	if v.owner == nil {
-		v.owner = r
 	}
 	return &v, nil
 }
@@ -70,7 +67,7 @@ func (r *Reader) LookupDetails(ip netip.Addr) (d Details, ok bool) {
 		r.details(id, &d)
 		ok = true
 	}
-	runtime.KeepAlive(r)
+	runtime.KeepAlive(r.m)
 	return d, ok
 }
 
@@ -85,7 +82,7 @@ func (r *Reader) ASN(ip netip.Addr) (ASN, bool) {
 	if id != 0 {
 		a = r.asn(id)
 	}
-	runtime.KeepAlive(r)
+	runtime.KeepAlive(r.m)
 	return a, id != 0
 }
 

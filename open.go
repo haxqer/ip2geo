@@ -57,7 +57,7 @@ func makeOptions(opts []Option) options {
 	return o
 }
 
-// unmapped counts the mappings released by the Reader cleanup; tests read it.
+// unmapped counts the mappings released by their cleanup; tests read it.
 var unmapped atomic.Int64
 
 // Open loads a compact database file. It refuses files larger than 2 GiB
@@ -68,8 +68,9 @@ var unmapped atomic.Int64
 // A regular file is memory-mapped on Unix and Windows unless NoMmap is
 // given; elsewhere, for other kinds of files, or when mapping fails, it is
 // read into the heap. A GEO2 file stays mapped, and the garbage collector
-// unmaps it once the Reader is unreachable (Close does not); see the
-// package documentation for why the file must not change meanwhile. A GEO1
+// unmaps it once the Reader, every copy of it and every Reader WithLanguage
+// made from it is unreachable (Close does not); see the package
+// documentation for why the file must not change meanwhile. A GEO1
 // file is converted to the GEO2 layout on the heap and unmapped before Open
 // returns.
 func Open(path string, opts ...Option) (*Reader, error) {
@@ -152,8 +153,8 @@ func badMagic(h []byte) error {
 }
 
 // openMapped opens a database from a memory mapping, which it either hands
-// to the Reader, released by a cleanup when the Reader is unreachable, or
-// releases before returning.
+// to the Reader as a mapping object, released by a cleanup once that object
+// is unreachable, or releases before returning.
 func openMapped(m []byte, o *options) (*Reader, error) {
 	if len(m) >= 4 && string(m[:4]) == format.Magic {
 		g, err := parseGEO2(m, o.skipChecksum)
@@ -166,8 +167,10 @@ func openMapped(m []byte, o *options) (*Reader, error) {
 			_ = munmap(m)
 			return nil, err
 		}
-		r.mapped = true
-		runtime.AddCleanup(r, releaseMapping, m)
+		// The cleanup is on the mapping object, which every copy and view
+		// of r shares, not on r: a copy of *r outlives r.
+		r.m = &mapping{b: m}
+		runtime.AddCleanup(r.m, releaseMapping, m)
 		return r, nil
 	}
 	r, err := openGEO1(m)

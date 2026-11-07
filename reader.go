@@ -50,6 +50,15 @@ type Reader struct {
 	recWidth int   // packed record width, format.RecordWidth(profile)
 	latDiv   float64
 
+	// m is the memory mapping the sections are in, or nil when they are on
+	// the Go heap. A cleanup on m unmaps the file once m is unreachable:
+	// every copy of the Reader, and every Reader WithLanguage made from it,
+	// shares m and keeps it reachable, and every method that reads the
+	// sections keeps m alive until its last read (runtime.KeepAlive(r.m)).
+	// The cleanup is on m rather than on the Reader because a Reader may be
+	// copied by value: the copy refers to m but not to the original Reader.
+	m *mapping
+
 	strings []string // id -> string over a heap copy of STRBLOB; strings[0] == ""
 	records []byte   // RECORDS: packed records, record 0 all zero
 
@@ -97,12 +106,14 @@ type Reader struct {
 	lang    int
 	nameOff [format.NumNameKinds]int
 
-	meta   Metadata
-	mapped bool // the sections are in a memory mapping released by a cleanup
+	meta Metadata
+}
 
-	// owner is the Reader a WithLanguage view was made from: the one whose
-	// cleanup releases the mapping, which the view keeps reachable.
-	owner *Reader
+// mapping is a memory-mapped file, released by a cleanup (see openMapped)
+// once the mapping object is unreachable. It is a separate heap object so
+// that its lifetime does not depend on any one Reader value.
+type mapping struct {
+	b []byte
 }
 
 // Profile reports the precision profile the database was built with.
@@ -112,15 +123,18 @@ func (r *Reader) Profile() Profile { return r.profile }
 func (r *Reader) Metadata() Metadata { return r.meta }
 
 // Close does nothing and returns nil. A memory-mapped database is unmapped
-// by the garbage collector once the Reader, and every Reader WithLanguage
-// made from it, is unreachable (through runtime.AddCleanup), not by Close,
-// so a Lookup that overlaps Close or follows it is still safe and keeps
-// answering. Drop every reference to the Reader to release its memory.
+// by the garbage collector once the Reader, every copy of it and every
+// Reader WithLanguage made from it is unreachable (through
+// runtime.AddCleanup), not by Close, so a Lookup that overlaps Close or
+// follows it is still safe and keeps answering. Drop every reference to the
+// Reader to release its memory.
 // Close is safe to call concurrently with Lookup and more than once.
 func (r *Reader) Close() error { return nil }
 
 // Lookup resolves an IP address to a Record. ok is false when the address is
-// not covered by the database, and for the zero netip.Addr.
+// not covered by the database, and for the zero netip.Addr. On a
+// ProfileASN database, Lookup reports whether ip is covered with an empty
+// Record: use ASN or LookupDetails for its data.
 //
 // IPv4 addresses in IPv6 form are looked up in the IPv4 table, as MaxMind
 // databases alias them: ::ffff:0:0/96 (IPv4-mapped), ::/96 (IPv4-compatible),
@@ -147,9 +161,9 @@ func (r *Reader) Lookup(ip netip.Addr) (rec Record, ok bool) {
 		}
 		ok = true
 	}
-	// The sections may live in a mapping that a cleanup releases once r is
-	// unreachable: keep r alive until the last read from them.
-	runtime.KeepAlive(r)
+	// The sections may live in a mapping that a cleanup releases once it is
+	// unreachable: keep it alive until the last read from them.
+	runtime.KeepAlive(r.m)
 	return rec, ok
 }
 
