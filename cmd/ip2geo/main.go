@@ -20,7 +20,9 @@
 //	              .mmdb, and dbip-city, dbip-country or dbip-asn for one
 //	              named dbip-city-lite*.csv, dbip-country-lite*.csv or
 //	              dbip-asn-lite*.csv (.gz); required otherwise
-//	-out          output .geoc file, replaced atomically (default city.geoc)
+//	-out          output .geoc file, replaced atomically (default
+//	              <profile>.geoc: city.geoc, region.geoc, country.geoc or
+//	              asn.geoc)
 //	-profile      city | region | country | asn (default city); asn needs an
 //	              ASN source and the others a City, Country or Enterprise one
 //	              (or a CSV layout with that data)
@@ -39,11 +41,25 @@
 // the GEO1 files written by v0.1.x. Packages mmdb and csvdb document what is
 // kept from each kind of source.
 //
-// lookup prints one line per address: the country ISO code, region name,
-// city name, coordinates and time zone, or for an ASN database the AS number
-// and organization. When the database has field sets, an indented
-// "key: value" line follows for each of their fields. -lang selects one of
-// the database's languages for the names (default the primary one).
+// lookup prints one line per address with what the database's profile
+// keeps: the country ISO code, then for the region and city profiles the
+// region name, then for the city profile the city name, joined by " / ",
+// as in
+//
+//	81.2.69.142: GB / England / London  (51.5142, -0.0931) Europe/London
+//
+// The city profile adds the coordinates in parentheses, unless the
+// database has the location field set and the source has no coordinates
+// for the address, and the time zone when there is one. Names missing at
+// the end are left out, a missing one before a present one is printed as
+// "-". For an ASN database the line has the AS number and organization.
+// When the database has field sets, an indented "key: value" line follows
+// for each of their fields, with the parts of the value the source does not
+// have left out ("key:" when it has none). An address without data prints
+// "no data". An address that does not parse is reported on stderr, and the
+// others are still looked up. -lang selects one of the database's
+// languages for the names (default the primary one). Text from the
+// database that is not printable is quoted, as by info.
 //
 // info prints the file size and the database's metadata, one "key: value"
 // per line: format (GEO2 or GEO1), profile, lat_scale, build_time,
@@ -56,11 +72,12 @@
 //
 // Errors are printed to stderr as "ip2geo: <command>: <error>". The exit
 // status is 0 on success, 1 when a build, lookup or info fails (including a
-// -latscale outside 0..7, a -description that is not valid UTF-8 or is longer
-// than 65,535 bytes, -fields the profile does not allow, an unsuitable source
-// database or a malformed CSV file, an unknown, empty or repeated -lang, a
-// -lang other than en with a CSV source, a gzipped .mmdb, and a file that is
-// not a valid database), and 2 for usage errors (unknown command or flag,
+// lookup address that is not a valid IP address, a -latscale outside 0..7, a
+// -description that is not valid UTF-8 or is longer than 65,535 bytes,
+// -fields the profile does not allow, an unsuitable source database or a
+// malformed CSV file, an unknown, empty or repeated -lang, a -lang other than
+// en with a CSV source, a gzipped .mmdb, and a file that is not a valid
+// database), and 2 for usage errors (unknown command or flag,
 // missing -src, unknown -format, no -format for a -src whose name does not
 // tell its format, unknown -profile or -fields name, unexpected arguments,
 // lookup without addresses).
@@ -109,7 +126,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 
 func usage(stderr io.Writer) int {
 	fmt.Fprintln(stderr, "usage:")
-	fmt.Fprintln(stderr, "  ip2geo build  -src City.mmdb|source.csv[.gz] -out city.geoc [-format "+strings.Join(formats, "|")+"]")
+	fmt.Fprintln(stderr, "  ip2geo build  -src City.mmdb|source.csv[.gz] [-out <profile>.geoc] [-format "+strings.Join(formats, "|")+"]")
 	fmt.Fprintln(stderr, "                [-profile city|region|country|asn] [-fields eu,continent,...|all]")
 	fmt.Fprintln(stderr, "                [-lang en[,de,...]] [-latscale 0..7] [-description text]")
 	fmt.Fprintln(stderr, "  ip2geo lookup -db city.geoc [-lang de] <ip> [ip...]")
@@ -151,7 +168,7 @@ func build(args []string, stdout, stderr io.Writer) int {
 	src := fs.String("src", "", "source `file`: a MaxMind DB City, Country, Enterprise or ASN .mmdb, or a DB-IP or IP2Location CSV, gzipped or not (required)")
 	format := fs.String("format", "", "source `format`: "+strings.Join(formats, ", ")+
 		" (default from the -src name: mmdb for *.mmdb, dbip-city for dbip-city-lite*.csv[.gz], and so on)")
-	out := fs.String("out", "city.geoc", "output .geoc `file`, replaced atomically")
+	out := fs.String("out", "", "output .geoc `file`, replaced atomically (default <profile>.geoc, e.g. asn.geoc for -profile asn)")
 	profile := fs.String("profile", "city", "city | region | country | asn")
 	fields := fs.String("fields", "", "optional field `sets`: comma-separated "+strings.Join(fieldSetNames(), ", ")+", or all")
 	lang := fs.String("lang", "en", "`languages` of names, comma-separated, the primary one first; each must be one the source database lists")
@@ -183,6 +200,9 @@ func build(args []string, stdout, stderr io.Writer) int {
 		p = ip2geo.ProfileASN
 	default:
 		return usageError(fs, "unknown -profile %q (want city, region, country or asn)", *profile)
+	}
+	if *out == "" {
+		*out = *profile + ".geoc"
 	}
 	fset, err := parseFields(*fields)
 	if err != nil {
@@ -260,20 +280,23 @@ func lookup(args []string, stdout, stderr io.Writer) int {
 	}
 	defer db.Close()
 	if *lang != "" {
-		// The Reader shares db's memory; db.Close releases it.
+		// The view shares db's memory, which stays mapped while either
+		// Reader is reachable (Close does not unmap it).
 		if db, err = db.WithLanguage(*lang); err != nil {
 			return fail(stderr, "lookup", err)
 		}
 	}
+	status := 0
 	for _, s := range fs.Args() {
 		ip, err := netip.ParseAddr(s)
 		if err != nil {
-			fmt.Fprintf(stdout, "%s: invalid address\n", s)
+			fmt.Fprintf(stderr, "ip2geo: lookup: %s: invalid address\n", text(s))
+			status = 1
 			continue
 		}
 		writeLookup(stdout, db, s, ip)
 	}
-	return 0
+	return status
 }
 
 // writeLookup prints the lookup of ip, given on the command line as s.
@@ -284,7 +307,7 @@ func writeLookup(w io.Writer, db *ip2geo.Reader, s string, ip netip.Addr) {
 			fmt.Fprintf(w, "%s: no data\n", s)
 			return
 		}
-		fmt.Fprintf(w, "%s: AS%d %s\n", s, as.Number, text(as.Organization))
+		fmt.Fprintf(w, "%s: %s\n", s, join("AS"+strconv.FormatUint(uint64(as.Number), 10), text(as.Organization)))
 		return
 	}
 	fset := db.Fields()
@@ -299,43 +322,105 @@ func writeLookup(w io.Writer, db *ip2geo.Reader, s string, ip netip.Addr) {
 		fmt.Fprintf(w, "%s: no data\n", s)
 		return
 	}
-	fmt.Fprintf(w, "%s: %s / %s / %s  (%.4f, %.4f) %s\n",
-		s, d.CountryISO, d.RegionName, d.City, d.Latitude, d.Longitude, d.TimeZone)
-	line := func(key, format string, args ...any) {
-		fmt.Fprintf(w, "  %s: "+format+"\n", append([]any{key}, args...)...)
+	fmt.Fprintf(w, "%s: %s\n", s, geoSummary(&d, db.Profile(), fset))
+	line := func(key, value string) {
+		if value == "" {
+			fmt.Fprintf(w, "  %s:\n", key)
+		} else {
+			fmt.Fprintf(w, "  %s: %s\n", key, value)
+		}
 	}
 	if fset&ip2geo.FieldEU != 0 {
-		line("eu", "%t", d.IsInEuropeanUnion)
+		line("eu", strconv.FormatBool(d.IsInEuropeanUnion))
 	}
 	if fset&ip2geo.FieldContinent != 0 {
-		line("continent", "%s (geoname %d)", text(d.ContinentName), d.ContinentGeoNameID)
+		line("continent", join(text(d.ContinentName), geoname(d.ContinentGeoNameID)))
 	}
 	if fset&ip2geo.FieldRegistered != 0 {
-		line("registered_country", "%s", countryText(d.RegisteredCountry))
-		line("represented_country", "%s type=%s", countryText(d.RepresentedCountry), text(d.RepresentedCountryType))
+		line("registered_country", countryText(d.RegisteredCountry))
+		typ := ""
+		if d.RepresentedCountryType != "" {
+			typ = "type=" + text(d.RepresentedCountryType)
+		}
+		line("represented_country", join(countryText(d.RepresentedCountry), typ))
 	}
 	if fset&ip2geo.FieldSubdivisions != 0 {
-		line("region_geoname", "%d", d.RegionGeoNameID)
-		line("region2", "%s %s (geoname %d)", text(d.Region2ISO), text(d.Region2Name), d.Region2GeoNameID)
+		line("region_geoname", strconv.FormatUint(uint64(d.RegionGeoNameID), 10))
+		line("region2", join(text(d.Region2ISO), text(d.Region2Name), geoname(d.Region2GeoNameID)))
 	}
 	if fset&ip2geo.FieldPostal != 0 {
-		line("postal_code", "%s", text(d.PostalCode))
+		line("postal_code", text(d.PostalCode))
 	}
 	if fset&ip2geo.FieldMetro != 0 {
-		line("metro_code", "%d", d.MetroCode)
+		line("metro_code", strconv.FormatUint(uint64(d.MetroCode), 10))
 	}
 	if fset&ip2geo.FieldTraits != 0 {
-		line("traits", "anycast=%t anonymous_proxy=%t satellite_provider=%t",
-			d.IsAnycast, d.IsAnonymousProxy, d.IsSatelliteProvider)
+		line("traits", fmt.Sprintf("anycast=%t anonymous_proxy=%t satellite_provider=%t",
+			d.IsAnycast, d.IsAnonymousProxy, d.IsSatelliteProvider))
 	}
 	if fset&ip2geo.FieldLocation != 0 {
-		line("location", "coordinates=%t accuracy_radius=%t", d.HasCoordinates, d.HasAccuracyRadius)
+		line("location", fmt.Sprintf("coordinates=%t accuracy_radius=%t", d.HasCoordinates, d.HasAccuracyRadius))
 	}
 }
 
-// countryText formats a registered or represented country.
+// geoSummary formats the first line of the lookup of a geo database with
+// profile p and field sets fset, after the address: the names p keeps, the
+// coordinates of the city profile and the time zone. It prints only what
+// the profile stores and the source has, so it never ends in a space.
+func geoSummary(d *ip2geo.Details, p ip2geo.Profile, fset ip2geo.FieldSet) string {
+	names := []string{d.CountryISO}
+	switch p {
+	case ip2geo.ProfileRegion:
+		names = append(names, d.RegionName)
+	case ip2geo.ProfileCity:
+		names = append(names, d.RegionName, d.City)
+	}
+	for len(names) > 1 && names[len(names)-1] == "" {
+		names = names[:len(names)-1]
+	}
+	for i, n := range names {
+		if n == "" {
+			names[i] = "-" // keeps the position of the names after it
+		} else {
+			names[i] = text(n)
+		}
+	}
+	var b strings.Builder
+	b.WriteString(strings.Join(names, " / "))
+	sep := "  "
+	// Without the location set a city database cannot tell a missing
+	// location from (0, 0), so it prints the coordinates as stored.
+	if p == ip2geo.ProfileCity && (fset&ip2geo.FieldLocation == 0 || d.HasCoordinates) {
+		fmt.Fprintf(&b, "  (%.4f, %.4f)", d.Latitude, d.Longitude)
+		sep = " "
+	}
+	if d.TimeZone != "" {
+		b.WriteString(sep)
+		b.WriteString(text(d.TimeZone))
+	}
+	return b.String()
+}
+
+// countryText formats a registered or represented country, or returns ""
+// when the source has none.
 func countryText(c ip2geo.Country) string {
-	return fmt.Sprintf("%s %s (geoname %d, eu=%t)", text(c.ISO), text(c.Name), c.GeoNameID, c.IsInEuropeanUnion)
+	if c == (ip2geo.Country{}) {
+		return ""
+	}
+	return join(text(c.ISO), text(c.Name), fmt.Sprintf("(geoname %d, eu=%t)", c.GeoNameID, c.IsInEuropeanUnion))
+}
+
+// geoname formats a GeoNames id, or returns "" for 0, which means none.
+func geoname(id uint32) string {
+	if id == 0 {
+		return ""
+	}
+	return fmt.Sprintf("(geoname %d)", id)
+}
+
+// join joins the parts that are not empty with spaces.
+func join(parts ...string) string {
+	return strings.Join(slices.DeleteFunc(parts, func(s string) bool { return s == "" }), " ")
 }
 
 // fieldSetName is the name of a field set in -fields and info.

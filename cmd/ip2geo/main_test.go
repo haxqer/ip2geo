@@ -110,13 +110,13 @@ func TestExitStatus(t *testing.T) {
 func TestLookup(t *testing.T) {
 	path, _ := writeDB(t)
 	status, stdout, stderr := runCLI("lookup", "-db", path, "81.2.69.142", "10.0.0.1", "2a00:1450::1", "::ffff:81.0.0.1", "bogus")
-	want := "81.2.69.142: GB /  /   (0.0000, 0.0000) \n" +
+	want := "81.2.69.142: GB\n" +
 		"10.0.0.1: no data\n" +
-		"2a00:1450::1: GB /  /   (0.0000, 0.0000) \n" +
-		"::ffff:81.0.0.1: GB /  /   (0.0000, 0.0000) \n" +
-		"bogus: invalid address\n"
-	if status != 0 || stdout != want || stderr != "" {
-		t.Errorf("status %d, stdout:\n%s\nstderr:\n%s\nwant status 0 and stdout:\n%s", status, stdout, stderr, want)
+		"2a00:1450::1: GB\n" +
+		"::ffff:81.0.0.1: GB\n"
+	wantErr := "ip2geo: lookup: bogus: invalid address\n"
+	if status != 1 || stdout != want || stderr != wantErr {
+		t.Errorf("status %d, stdout:\n%s\nstderr:\n%s\nwant status 1, stdout:\n%s\nstderr:\n%s", status, stdout, stderr, want, wantErr)
 	}
 }
 

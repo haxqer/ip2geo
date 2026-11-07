@@ -52,9 +52,9 @@ func TestBuildCSV(t *testing.T) {
 		t.Fatalf("build: status %d\n%s%s", status, stdout, stderr)
 	}
 	status, stdout, _ = runCLI("lookup", "-db", out, "1.0.0.1", "2a00::1", "0.0.0.1")
-	want := "1.0.0.1: AU / Queensland / South Brisbane  (-27.4767, 153.0170) \n" +
+	want := "1.0.0.1: AU / Queensland / South Brisbane  (-27.4767, 153.0170)\n" +
 		"  location: coordinates=true accuracy_radius=false\n" +
-		"2a00::1: DE / Hesse / Frankfurt  (50.1109, 8.6821) \n" +
+		"2a00::1: DE / Hesse / Frankfurt  (50.1109, 8.6821)\n" +
 		"  location: coordinates=true accuracy_radius=false\n" +
 		"0.0.0.1: no data\n"
 	if status != 0 || stdout != want {
@@ -76,7 +76,7 @@ func TestBuildCSV(t *testing.T) {
 	if status != 0 || !strings.Contains(stdout, "profile=country networks=1 ") {
 		t.Fatalf("build: status %d\n%s%s", status, stdout, stderr)
 	}
-	if status, stdout, _ = runCLI("lookup", "-db", out, "1.0.0.1"); status != 0 || stdout != "1.0.0.1: AU /  /   (0.0000, 0.0000) \n" {
+	if status, stdout, _ = runCLI("lookup", "-db", out, "1.0.0.1"); status != 0 || stdout != "1.0.0.1: AU\n" {
 		t.Errorf("lookup: status %d\n%s", status, stdout)
 	}
 
