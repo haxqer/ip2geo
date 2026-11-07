@@ -100,6 +100,14 @@ jobs:
           MONTH: ${{ steps.month.outputs.month }}
         run: scripts/data-release.sh verify "$MONTH" "$RUNNER_TEMP/data"
 
+      # build runs from main, which can be ahead of the last release: refuse
+      # to publish files that the newest released reader cannot open.
+      - name: Check with the latest release
+        if: steps.existing.outputs.exists == 'false'
+        env:
+          MONTH: ${{ steps.month.outputs.month }}
+        run: scripts/data-release.sh compat "$MONTH" "$RUNNER_TEMP/data"
+
       - name: Publish
         if: steps.existing.outputs.exists == 'false'
         env:

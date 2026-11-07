@@ -3,11 +3,13 @@
 #
 #   scripts/data-release.sh build   YYYY-MM OUTDIR   download DB-IP City, Country and ASN Lite and build the assets
 #   scripts/data-release.sh verify  YYYY-MM OUTDIR   run the builder-vs-source integration test
+#   scripts/data-release.sh compat  YYYY-MM OUTDIR   check that the latest released CLI opens the .geoc assets
 #   scripts/data-release.sh exists  YYYY-MM          exit 0 if release data-YYYY-MM exists, 1 if not
 #   scripts/data-release.sh publish YYYY-MM OUTDIR   create GitHub Release data-YYYY-MM from OUTDIR
 #
 # build and verify need only Go, curl and gzip: no token, no network access
-# beyond download.db-ip.com. exists and publish use the GitHub CLI (gh) and
+# beyond download.db-ip.com. compat also fetches the latest released module
+# through the Go module proxy (RELEASED_VERSION overrides @latest). exists and publish use the GitHub CLI (gh) and
 # need GH_TOKEN (data.yml passes the workflow's GITHUB_TOKEN); GH_REPO selects
 # the repository, otherwise gh uses the current checkout's remote.
 #
@@ -48,7 +50,7 @@ die() {
 }
 
 usage() {
-	sed -n '2,7p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' >&2
+	sed -n '2,8p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' >&2
 	exit 2
 }
 
@@ -269,6 +271,38 @@ cmd_verify() {
 		go test -count=1 -timeout 30m -run 'TestBuildMatchesSource|TestRegisteredCountryOnly' -v ./mmdb/)
 }
 
+# cmd_compat checks the assets against the newest released reader, not only
+# the checkout that built them: build runs from main, which can be ahead of
+# the last tag (for example mid-way through a format change), and a published
+# file that no released version opens would break every existing user.
+cmd_compat() {
+	local month=$1 out work version bin profile geoc line ip
+	out="$(abs_dir "$2")"
+	work="$(abs_dir "$(work_dir "$out")")"
+	version="${RELEASED_VERSION:-latest}"
+
+	# Install outside the checkout so the local go.mod plays no part.
+	(cd "$work" && GOBIN="$work/released" CGO_ENABLED=0 \
+		go install "github.com/haxqer/ip2geo/cmd/ip2geo@${version}")
+	bin="$work/released/ip2geo"
+
+	for profile in "${PROFILES[@]}"; do
+		[[ -s "$out/dbip-${profile}-lite.geoc.gz" ]] ||
+			die "$out/dbip-${profile}-lite.geoc.gz not found; run '$0 build $month $2' first"
+		geoc="$work/compat-${profile}.geoc"
+		gunzip -c "$out/dbip-${profile}-lite.geoc.gz" >"$geoc"
+		"$bin" info -db "$geoc" >/dev/null ||
+			die "$profile: ip2geo@${version} cannot open the built file"
+		for ip in 8.8.8.8 2001:4860:4860::8888; do
+			line="$("$bin" lookup -db "$geoc" "$ip")"
+			log "$profile (ip2geo@${version}): $line"
+			[[ $line == "$ip: "* && $line != *"no data"* ]] ||
+				die "$profile: ip2geo@${version} lookup of $ip failed: $line"
+		done
+		rm -f "$geoc"
+	done
+}
+
 # gh_repo -> OWNER/NAME: $GH_REPO if set, else this checkout's GitHub remote.
 gh_repo() {
 	command -v gh >/dev/null 2>&1 || die "the GitHub CLI (gh) is required"
@@ -348,7 +382,7 @@ main() {
 	local cmd=$1 month=$2
 	check_month "$month"
 	case $cmd in
-	build | verify | publish)
+	build | verify | compat | publish)
 		[[ $# -eq 3 ]] || usage
 		"cmd_$cmd" "$month" "$3"
 		;;
