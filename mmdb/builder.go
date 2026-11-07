@@ -277,10 +277,14 @@ func readSource(srcMMDB string, co build.Options) (*build.Builder, error) {
 			if err := dec.decode(result, &rec); err != nil {
 				return nil, fmt.Errorf("mmdb: %q: decode network %s: %w", srcMMDB, result.Prefix(), err)
 			}
-			recID = b.Record(&rec)
+			if recID, err = b.Record(&rec); err != nil {
+				return nil, fmt.Errorf("mmdb: %q: network %s: %w", srcMMDB, result.Prefix(), err)
+			}
 			byOffset[off] = recID
 		}
-		b.AddPrefix(result.Prefix(), recID)
+		if err := b.AddPrefix(result.Prefix(), recID); err != nil {
+			return nil, fmt.Errorf("mmdb: %q: %w", srcMMDB, err)
+		}
 	}
 	return b, nil
 }
@@ -296,7 +300,10 @@ func readSource(srcMMDB string, co build.Options) (*build.Builder, error) {
 // Errors wrap ErrOptions, ErrDatabaseType, ErrLanguage, ErrStringTooLong or
 // ErrTooManyStrings when the options or the source database are unsuitable,
 // and the underlying error (for example fs.ErrNotExist) when the source
-// cannot be read.
+// cannot be read. A ProfileCity build also fails on a source latitude
+// outside [-90, 90] or longitude outside [-180, 180] (NaN included), and
+// any build on a network ::/n with n < 96, which would hide the source's
+// IPv4 data from IPv4 lookups.
 func Open(srcMMDB string, opts Options) (*ip2geo.Reader, error) {
 	buf, _, err := buildFile(srcMMDB, &opts)
 	if err != nil {
@@ -318,7 +325,9 @@ func Open(srcMMDB string, opts Options) (*ip2geo.Reader, error) {
 // partial file. On any error the temporary file is removed and an existing
 // outPath is left untouched. A new file gets mode 0644; a replaced file keeps
 // its permission bits. If outPath is a symbolic link, the link itself is
-// replaced.
+// replaced. Before writing, Build loads the built database as
+// ip2geo.OpenBytes does and writes nothing if that fails or if the database
+// is over the format's 2 GiB limit (an error wrapping ip2geo.ErrTooLarge).
 //
 // Errors are reported as for Open.
 func Build(srcMMDB, outPath string, opts Options) (*Stats, error) {
@@ -326,7 +335,7 @@ func Build(srcMMDB, outPath string, opts Options) (*Stats, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := build.WriteFileAtomic(outPath, buf); err != nil {
+	if err := build.WriteDatabase(outPath, buf); err != nil {
 		return nil, fmt.Errorf("mmdb: %w", err)
 	}
 	s := Stats(st)

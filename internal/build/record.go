@@ -1,6 +1,7 @@
 package build
 
 import (
+	"fmt"
 	"math"
 
 	"github.com/haxqer/ip2geo"
@@ -67,7 +68,9 @@ type City struct {
 }
 
 // Location is the location of a Record. A missing coordinate is 0; the
-// Has fields say whether the source has the values.
+// Has fields say whether the source has the values. A ProfileCity build
+// rejects a latitude outside [-90, 90] or a longitude outside [-180, 180],
+// NaN included (see Builder.Record).
 type Location struct {
 	Latitude, Longitude float64
 	AccuracyRadius      uint16
@@ -104,16 +107,42 @@ type recKey struct {
 	ext                                                                     uint32
 }
 
+// scaleCoord returns round(v * scale) as stored in a record, or an error
+// when v is NaN or outside [-limit, limit], or the scaled value does not
+// fit an int32. Go leaves the conversion of such a float to int32
+// implementation-defined, so without the check the file would depend on the
+// architecture of the machine that built it.
+func scaleCoord(what string, v, limit, scale float64) (int32, error) {
+	if !(math.Abs(v) <= limit) { // false for NaN as well
+		return 0, fmt.Errorf("%s %v is outside [%v, %v]", what, v, -limit, limit)
+	}
+	s := math.Round(v * scale)
+	if !(s >= math.MinInt32 && s <= math.MaxInt32) {
+		return 0, fmt.Errorf("%s %v times %v does not fit an int32", what, v, scale)
+	}
+	return int32(s), nil
+}
+
 // key returns the record key of r for profile p, with provisional string
 // ids. It interns the strings in a fixed order, so string ids depend only on
 // the order in which records are first seen, and marks every string of a
-// 16-bit field as such.
-func (r *Record) key(p ip2geo.Profile, scale float64, strs *interner) recKey {
+// 16-bit field as such. It fails, before interning anything, on a
+// coordinate that ProfileCity cannot store.
+func (r *Record) key(p ip2geo.Profile, scale float64, strs *interner) (recKey, error) {
 	var k recKey
 	if p == ip2geo.ProfileASN {
 		k.countryGeo = r.ASN.Number
 		k.cityName = strs.id(r.ASN.Organization)
-		return k
+		return k, nil
+	}
+	if p >= ip2geo.ProfileCity {
+		var err error
+		if k.lat, err = scaleCoord("latitude", r.Location.Latitude, 90, scale); err != nil {
+			return recKey{}, err
+		}
+		if k.lon, err = scaleCoord("longitude", r.Location.Longitude, 180, scale); err != nil {
+			return recKey{}, err
+		}
 	}
 	k.countryISO = strs.id16(r.Country.ISOCode)
 	k.countryName = strs.id16(name(r.Country.Names, 0))
@@ -126,10 +155,8 @@ func (r *Record) key(p ip2geo.Profile, scale float64, strs *interner) recKey {
 	if p >= ip2geo.ProfileCity {
 		k.cityName = strs.id(name(r.City.Names, 0))
 		k.cityGeo = r.City.GeoNameID
-		k.lat = int32(math.Round(r.Location.Latitude * scale))
-		k.lon = int32(math.Round(r.Location.Longitude * scale))
 		k.acc = r.Location.AccuracyRadius
 		k.tz = strs.id16(r.Location.TimeZone)
 	}
-	return k
+	return k, nil
 }

@@ -275,9 +275,17 @@ func (b *Builder) Options() *Options { return &b.opts }
 // Record interns r and returns its record id, which is never 0. Records
 // that are equal in every field the build keeps get the same id. r is not
 // retained.
-func (b *Builder) Record(r *Record) uint32 {
+//
+// A ProfileCity build fails on a latitude outside [-90, 90] or a longitude
+// outside [-180, 180], NaN and infinities included, which cannot be stored;
+// the build is unchanged by the failed call. Other profiles store no
+// coordinates and do not look at them.
+func (b *Builder) Record(r *Record) (uint32, error) {
+	k, err := r.key(b.opts.Profile, b.scale, b.strs)
+	if err != nil {
+		return 0, err
+	}
 	b.distinct++
-	k := r.key(b.opts.Profile, b.scale, b.strs)
 	if b.x != nil {
 		k.ext = b.x.add(r, b.strs)
 	}
@@ -287,27 +295,41 @@ func (b *Builder) Record(r *Record) uint32 {
 		b.keys[k] = id
 		b.recs.push(k)
 	}
-	return id
+	return id, nil
 }
 
-// AddPrefix adds a network whose data is record id. An IPv4-mapped IPv6
-// prefix (::ffff:0:0/96 and below) is an IPv4 network.
-func (b *Builder) AddPrefix(pfx netip.Prefix, id uint32) {
-	b.networks++
-	addr := pfx.Addr()
-	if addr.Is4() || addr.Is4In6() {
+// AddPrefix adds a network whose data is record id. pfx must be masked, as
+// maxminddb's Networks yields it. An IPv4-mapped IPv6 prefix
+// (::ffff:0:0/96 and below) is an IPv4 network, as an IPv4-mapped address
+// of AddRange is. maxminddb does not yield one for MaxMind and DB-IP files,
+// whose ::ffff:0:0/96 is an alias of the IPv4 subtree that it skips, but
+// does for a source that stores data there instead.
+//
+// An IPv6 prefix ::/n with n < 96 fails: it covers the whole IPv4 subtree of
+// an IPv6 MaxMind DB (::/96) and more, but ip2geo.Reader looks IPv4
+// addresses up in the IPv4 index only, so no IPv4 lookup would find the
+// data.
+func (b *Builder) AddPrefix(pfx netip.Prefix, id uint32) error {
+	addr, bits := pfx.Addr(), pfx.Bits()
+	if addr.Is4In6() {
+		addr, bits = addr.Unmap(), bits-96 // a masked prefix has bits >= 96 here
+	}
+	if addr.Is4() {
 		a := addr.As4()
 		start := binary.BigEndian.Uint32(a[:])
-		bits := pfx.Bits()
-		if addr.Is4In6() {
-			bits -= 96
-		}
 		last := start | uint32((uint64(1)<<(32-bits))-1)
 		b.v4.add(range4{start: start, last: last, rec: id})
-	} else {
-		s16 := addr.As16()
-		b.v6.add(range6{start: s16, last: lastV6(s16, pfx.Bits()), rec: id})
+		b.networks++
+		return nil
 	}
+	if bits < 96 && pfx.Contains(netip.IPv6Unspecified()) {
+		return fmt.Errorf("network %s covers all of IPv4 (::/96), which is stored in a separate IPv4 index; "+
+			"a source must keep its IPv4 data in the ::/96 subtree", pfx)
+	}
+	s16 := addr.As16()
+	b.v6.add(range6{start: s16, last: lastV6(s16, bits), rec: id})
+	b.networks++
+	return nil
 }
 
 // AddRange adds the addresses first to last, inclusive, whose data is

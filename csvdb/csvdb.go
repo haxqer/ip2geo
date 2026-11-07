@@ -333,7 +333,9 @@ func Open(src string, opts Options) (*ip2geo.Reader, error) {
 
 // Build reads src and writes a compact .geoc database to outPath, which
 // ip2geo.Open then loads. The output is replaced atomically, as by
-// mmdb.Build: on any error an existing outPath is left untouched.
+// mmdb.Build: on any error an existing outPath is left untouched, and
+// nothing is written unless the built database loads with ip2geo.OpenBytes
+// and is within the format's 2 GiB limit (ip2geo.ErrTooLarge).
 //
 // Errors are reported as for Open.
 func Build(src, outPath string, opts Options) (*Stats, error) {
@@ -341,7 +343,7 @@ func Build(src, outPath string, opts Options) (*Stats, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := build.WriteFileAtomic(outPath, buf); err != nil {
+	if err := build.WriteDatabase(outPath, buf); err != nil {
 		return nil, fmt.Errorf("csvdb: %w", err)
 	}
 	s := Stats(st)

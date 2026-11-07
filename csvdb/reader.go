@@ -122,7 +122,10 @@ func (r *reader) row() error {
 		if err := r.fill(); err != nil {
 			return err
 		}
-		id = r.b.Record(&r.rec)
+		var err error
+		if id, err = r.b.Record(&r.rec); err != nil {
+			return r.sc.errorf("%v", err)
+		}
 		r.ids[string(r.key)] = id
 	}
 	return r.add(first, last, id)
