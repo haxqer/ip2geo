@@ -297,9 +297,12 @@ jobs:
 
       # fetch downloads the three sources and checks them against the
       # release's checksums.txt. It exits 0 (sources ready), 1 (the release
-      # has no source assets -> skip) or 2 (any error -> fail).
+      # has no source assets -> skip) or 2 (any error -> fail). When the
+      # release download URLs fail it falls back to the API through gh.
       - name: Fetch the pinned DB-IP Lite sources
         id: fetch
+        env:
+          GH_TOKEN: ${{ github.token }} # only for the gh fallback when the download URLs fail
         run: |
           month="$(scripts/size-table.sh month)"
           rc=0

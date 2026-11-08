@@ -22,7 +22,10 @@
 # data release, and checksums.txt there must list them. It needs curl only,
 # no token. GH_SERVER and GH_REPO (or GitHub Actions' GITHUB_SERVER_URL and
 # GITHUB_REPOSITORY) select the repository, default haxqer/ip2geo on
-# github.com.
+# github.com. When the release download URLs fail with an HTTP error other
+# than 404, and gh is installed and signed in (or has GH_TOKEN), fetch asks
+# the API through gh instead: github.com has served 504s on those URLs for
+# hours while the API kept working.
 #
 # Exit status: 0 on success; 1 from check when README.md is stale, and from
 # fetch when the release has no source assets; 2 on any error.
@@ -121,40 +124,67 @@ cmd_check() {
 	return 1
 }
 
-# http_status URL -> the final HTTP status of a HEAD request (redirects followed).
+# http_status URL -> the final HTTP status of a HEAD request (redirects
+# followed), or 000 when the server cannot be reached.
 http_status() {
-	curl -sSIL --retry 2 -o /dev/null -w '%{http_code}' "$1" || die "cannot reach $1"
+	curl -sSIL --retry 2 -o /dev/null -w '%{http_code}' "$1" || true
+}
+
+have_gh() { command -v gh >/dev/null 2>&1; }
+
+# gh_assets TAG -> the asset names of release TAG through the API, one per
+# line; fails when gh cannot list them.
+gh_assets() {
+	gh release view "$1" -R "$ghrepo" --json assets --jq '.assets[].name'
 }
 
 cmd_fetch() {
-	local out month server repo base
+	local out month server repo base tag ghrepo
 	month="$(pinned_month)"
 	mkdir -p "$1"
 	out="$(cd "$1" && pwd)"
 	server="${GH_SERVER:-${GITHUB_SERVER_URL:-https://github.com}}"
 	repo="${GH_REPO:-${GITHUB_REPOSITORY:-haxqer/ip2geo}}"
-	base="${server}/${repo}/releases/download/data-${month}"
+	tag="data-${month}"
+	base="${server}/${repo}/releases/download/${tag}"
+	ghrepo="${server#*://}/${repo}"
 
 	# Releases published before data-release.sh attached the sources have
 	# none: report that as "absent" (1), not as an error.
-	local ed name status files=()
+	local ed name status files=() assets=""
 	for ed in "${EDITIONS[@]}"; do
 		name="dbip-${ed}-lite.mmdb.gz"
 		status="$(http_status "$base/$name")"
 		case $status in
 		200) files+=("$name") ;;
 		404)
-			log "release data-${month} has no $name ($base/$name is HTTP 404)"
+			log "release ${tag} has no $name ($base/$name is HTTP 404)"
 			return 1
 			;;
-		*) die "unexpected HTTP $status from $base/$name" ;;
+		*)
+			have_gh || die "unexpected HTTP $status from $base/$name (install gh to fetch through the API instead)"
+			log "HTTP $status from $base/$name; asking the API through gh"
+			if [[ -z $assets ]]; then
+				assets="$(gh_assets "$tag")" || die "unexpected HTTP $status from $base/$name, and gh cannot list the assets of ${tag}"
+			fi
+			if ! grep -qxF "$name" <<<"$assets"; then
+				log "release ${tag} has no $name (not among its assets)"
+				return 1
+			fi
+			files+=("$name")
+			;;
 		esac
 	done
 
 	local f
 	for f in checksums.txt "${files[@]}"; do
 		log "downloading $base/$f"
-		curl -fsSL --retry 3 --retry-delay 5 -o "$out/$f.part" "$base/$f" || die "cannot download $base/$f"
+		if ! curl -fsSL --retry 3 --retry-delay 5 -o "$out/$f.part" "$base/$f"; then
+			have_gh || die "cannot download $base/$f (install gh to fetch through the API instead)"
+			log "cannot download $base/$f; downloading it through gh"
+			gh release download "$tag" -R "$ghrepo" -p "$f" -O "$out/$f.part" --clobber ||
+				die "cannot download $f of ${tag}, from $base/$f or through gh"
+		fi
 		mv "$out/$f.part" "$out/$f"
 	done
 
