@@ -121,8 +121,7 @@ func TestCopyKeepsMapping(t *testing.T) {
 		runtime.GC()
 		checkLikeRef(t, "view of a dropped copy", view, deRef)
 	}
-	runtime.KeepAlive(view)
-	view = nil
+	runtime.KeepAlive(view) // view is unreachable from here on
 
 	for deadline := time.Now().Add(5 * time.Second); unmapped.Load() < before+2; {
 		if time.Now().After(deadline) {
