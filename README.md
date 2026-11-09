@@ -8,7 +8,7 @@ A fast, **zero-dependency** IP-geolocation reader for Go.
 
 You convert a MaxMind GeoIP2 / GeoLite2 **City** `.mmdb` into a compact `.geoc`
 file once, then look up IPv4 **and** IPv6 addresses in it. On random IPv4 a
-lookup is a median **14.5× (city profile) to 58× (country profile) faster**
+lookup is a median **17× (city profile) to 106× (country profile) faster**
 than [`oschwald/geoip2-golang`](https://github.com/oschwald/geoip2-golang)
 `City()`. The input is the same `netip.Addr`, but `Lookup` returns
 `(Record, bool)` rather than geoip2-golang's `(*City, error)`.
@@ -21,18 +21,18 @@ each figure is the median of 5 runs. The speedup column divides every row by
 
 | reader | ns / lookup | throughput | speedup vs `City()` |
 |---|--:|--:|--:|
-| `geoip2-golang` `City()` | 1768 | 0.6 M/s | 1× (baseline) |
-| `geoip2-golang` `Country()` | 1121 | 0.9 M/s | 1.6× |
-| **`ip2geo` `Lookup()` — city profile** | **119** | **8.4 M/s** | **14.5×** (13.2–19.3× over 5 runs) |
-| **`ip2geo` `Lookup()` — country profile** | **30.5** | **32.8 M/s** | **58×** |
+| `geoip2-golang` `City()` | 1857 | 0.5 M/s | 1× (baseline) |
+| `geoip2-golang` `Country()` | 1173 | 0.9 M/s | 1.6× |
+| **`ip2geo` `Lookup()` — city profile** | **108** | **9.3 M/s** | **17.3×** (15.5–20.8× over 5 runs) |
+| **`ip2geo` `Lookup()` — country profile** | **17.5** | **57.1 M/s** | **106×** |
 
 Same input addresses for every row. The city profile returns country, top
 region, city, coordinates, accuracy and time zone; `City()` decodes more
 (postal code, every subdivision, registered country, all languages).
 Reproduce it with [`bench/`](bench) — see below.
 
-IPv6 lookups inside the source's networks take about 42 ns on the country
-profile and about 210 ns on the city profile, where a few very dense /32
+IPv6 lookups inside the source's networks take about 38 ns on the country
+profile and about 135 ns on the city profile, where a few very dense /32
 prefixes dominate the search.
 
 ## Install
