@@ -10,8 +10,9 @@ You convert a MaxMind GeoIP2 / GeoLite2 **City** `.mmdb` into a compact `.geoc`
 file once, then look up IPv4 **and** IPv6 addresses in it. On random IPv4 a
 lookup is a median **17× (city profile) to 106× (country profile) faster**
 than [`oschwald/geoip2-golang`](https://github.com/oschwald/geoip2-golang)
-`City()`. The input is the same `netip.Addr`, but `Lookup` returns
-`(Record, bool)` rather than geoip2-golang's `(*City, error)`.
+`City()`, and on IPv6 **22× to 74× faster**. The input is the same
+`netip.Addr`, but `Lookup` returns `(Record, bool)` rather than
+geoip2-golang's `(*City, error)`.
 
 ## Speed
 
@@ -31,8 +32,18 @@ region, city, coordinates, accuracy and time zone; `City()` decodes more
 (postal code, every subdivision, registered country, all languages).
 Reproduce it with [`bench/`](bench) — see below.
 
-IPv6 lookups inside the source's networks take about 34 ns on the country
-profile and about 110 ns on the city profile.
+### IPv6
+
+Most of the IPv6 space is not in the database, so this table looks up
+5,000,000 random addresses inside the source's IPv6 networks: a random
+network, then a random address in it. Same machine and method as above:
+
+| reader | ns / lookup | throughput | speedup vs `City()` |
+|---|--:|--:|--:|
+| `geoip2-golang` `City()` | 2496 | 0.4 M/s | 1× (baseline) |
+| `geoip2-golang` `Country()` | 1474 | 0.7 M/s | 1.7× |
+| **`ip2geo` `Lookup()` — city profile** | **112** | **9.0 M/s** | **22.4×** (17.0–25.0× over 5 runs) |
+| **`ip2geo` `Lookup()` — country profile** | **34.4** | **29.1 M/s** | **74×** |
 
 ## Install
 
@@ -274,8 +285,9 @@ cd bench
 go run . -mmdb /path/to/GeoIP2-City.mmdb -city ../city.geoc -country ../country.geoc
 ```
 
-The comparison against `geoip2-golang` lives in its own module so that
-dependency never touches the `ip2geo` library.
+It prints the IPv4 table and then the IPv6 one. The comparison against
+`geoip2-golang` lives in its own module so that dependency never touches the
+`ip2geo` library.
 
 For IPv4 and IPv6 lookups on your own source, `BenchmarkLookup` builds the
 readers in memory and reports ns/op and allocs/op:
