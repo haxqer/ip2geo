@@ -144,10 +144,9 @@ func (r *Reader) start4(i, hint int) uint32 {
 // index6 is search6 returning the index of the boundary holding hi:lo, -1
 // when it is below the first one.
 func (r *Reader) index6(hi, lo uint64) int {
-	d := r.v6dir[hi>>(64-v6IdxBits)]
-	s := d>>v6KBits + uint32(v6Slot(hi, d&v6KMask))
-	e := r.v6l2[s]
-	l, h := int(e&v6SlotIdxMask), int(r.v6l2[s+1]&v6SlotIdxMask)
+	s := r.v6Leaf(hi)
+	e := r.v6tab[s]
+	l, h := int(e&v6SlotIdxMask), r.v6First(r.v6tab[s+1])
 	first := l
 	v := r.v6hi
 	for l < h {

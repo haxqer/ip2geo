@@ -6,6 +6,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+- The IPv6 index built at open splits crowded slots again: a slot of more
+  than 64 starts gets a child table over the next bits, down to bit 64 if
+  need be, so on real data a lookup binary-searches a few dozen starts
+  instead of thousands. On DB-IP Lite 2026-10, IPv6 `Lookup` is 29–30%
+  faster and `LookupRange` 27–32% faster (Apple M3), still without
+  allocating; IPv4 is unchanged. The city file's index takes 3.1 MB more
+  heap (6.4 MB; 1.5 MB more for a GeoIP2 City build) and the country
+  file's slightly less; building it at open takes about 2 ms longer on a
+  city file and allocates nothing beyond the index. The file format is
+  unchanged.
+
 ## [0.3.2] - 2026-11-09
 
 ### Changed

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"math/bits"
 	"math/rand/v2"
 	"net/netip"
 	"sort"
@@ -378,10 +379,31 @@ func openDB(t testing.TB, d *testDB) *Reader {
 	return r
 }
 
-// l2Bits returns the level-2 bits of the top-16 bucket holding prefix p.
-func l2Bits(r *Reader, p string) int {
+// childBits returns the bits of the child table under the root slot of the
+// top-16 bucket holding prefix p, 0 when that slot is a leaf.
+func childBits(r *Reader, p string) int {
 	a := netip.MustParsePrefix(p).Addr().As16()
-	return int(r.v6dir[binary.BigEndian.Uint16(a[:2])] & v6KMask)
+	e := r.v6tab[binary.BigEndian.Uint16(a[:2])]
+	if e&v6SlotChild == 0 {
+		return 0
+	}
+	return int(e>>v6ChildKShift&0xF) + 1
+}
+
+// v6PathBits returns the bit positions where the tables on the way to the
+// leaf slot of top half hi end: v6IdxBits for the root, then that plus the
+// bits of each child table. The last one is the prefix length of the leaf.
+func v6PathBits(r *Reader, hi uint64) []int {
+	t := r.v6tab
+	s := uint(hi >> (64 - v6IdxBits))
+	path := []int{v6IdxBits}
+	for e := t[s]; e&v6SlotChild != 0; e = t[s] {
+		pos := path[len(path)-1]
+		k := int(e>>v6ChildKShift&0xF) + 1
+		s = uint(e&v6ChildOffMask) + uint(hi<<pos>>(64-k))
+		path = append(path, pos+k)
+	}
+	return path
 }
 
 // checkV6 checks search6 against the definition of a range, around every
@@ -439,9 +461,14 @@ func checkV6(t *testing.T, d *testDB, r *Reader, extra ...[16]byte) {
 	}
 }
 
-// slotEdgeStarts returns 8 starts in each of the 2^k level-2 slots of the
-// top-16 bucket top: on the slot's first address, six inside, and on its
-// last address, a one-address range. 8 * 2^k starts give the bucket k bits.
+// splitK is the fewest table bits k for which slotEdgeStarts(top, k) puts
+// more than v6SplitStarts starts in the bucket, so that it is split.
+var splitK = bits.Len(uint(v6SplitStarts / 8))
+
+// slotEdgeStarts returns 8 starts in each of the 2^k slots of a k-bit table
+// under the top-16 bucket top: on the slot's first address, six inside, and
+// on its last address, a one-address range. 8 * 2^k starts give the bucket
+// a child table of k bits when they are more than v6SplitStarts.
 func slotEdgeStarts(top uint64, k int) [][16]byte {
 	var out [][16]byte
 	shift := 48 - k
@@ -463,14 +490,21 @@ func TestV6IndexSlotEdges(t *testing.T) {
 			starts := slotEdgeStarts(0x2a02, k)
 			d := v6DB(starts)
 			r := openDB(t, d)
-			if got := l2Bits(r, "2a02::/16"); got != k {
-				t.Fatalf("2a02::/16 has %d level-2 bits, want %d", got, k)
+			want := k
+			if len(starts) <= v6SplitStarts {
+				want = 0 // the bucket is a leaf
 			}
-			// Each slot's edges, the bucket's edges and the addresses
-			// just outside them.
+			if got := childBits(r, "2a02::/16"); got != want {
+				t.Fatalf("2a02::/16 has a child table of %d bits, want %d", got, want)
+			}
+			// The edges of each slot on the way to each start's leaf,
+			// the bucket's edges and the addresses just outside them.
 			var extra [][16]byte
 			for _, s := range starts {
-				extra = append(extra, add16(s, 1), fillFrom(s, 16+k, 0), fillFrom(s, 16+k, 0xFF))
+				extra = append(extra, add16(s, 1))
+				for _, bit := range v6PathBits(r, binary.BigEndian.Uint64(s[:8])) {
+					extra = append(extra, fillFrom(s, bit, 0), fillFrom(s, bit, 0xFF))
+				}
 			}
 			lo, hi := key16(0x2a02<<48, 0), key16(0x2a02<<48|(1<<48-1), math.MaxUint64)
 			extra = append(extra, lo, add16(lo, -1), hi, add16(hi, 1))
@@ -486,9 +520,9 @@ func TestV6IndexSlotEdges(t *testing.T) {
 }
 
 // deepV6Starts returns over 8 * 2^16 starts, all inside 2a02::/16, so that
-// the bucket gets the most level-2 bits, v6MaxL2Bits: one on the first and
-// one on the last address of each 2a02:s::/32 slot, and a dense cluster in
-// 2a02:abcd::/32 of pairs that share their top 64 bits.
+// the bucket gets the widest child table, of v6MaxTableBits bits: one on the
+// first and one on the last address of each 2a02:s::/32 slot, and a dense
+// cluster in 2a02:abcd::/32 of pairs that share their top 64 bits.
 func deepV6Starts() [][16]byte {
 	const top = 0x2a02 << 48
 	var out [][16]byte
@@ -508,12 +542,12 @@ func TestV6IndexDeepBucket(t *testing.T) {
 	starts := deepV6Starts()
 	d := v6DB(starts)
 	r := openDB(t, d)
-	if got := l2Bits(r, "2a02::/16"); got != v6MaxL2Bits {
-		t.Fatalf("2a02::/16 has %d level-2 bits for %d starts, want %d", got, len(starts), v6MaxL2Bits)
+	if got := childBits(r, "2a02::/16"); got != v6MaxTableBits {
+		t.Fatalf("2a02::/16 has a child table of %d bits for %d starts, want %d", got, len(starts), v6MaxTableBits)
 	}
 	for _, p := range []string{"::/16", "2a01::/16", "2a03::/16", "ffff::/16"} {
-		if got := l2Bits(r, p); got != 0 {
-			t.Errorf("empty bucket %s has %d level-2 bits, want 0", p, got)
+		if got := childBits(r, p); got != 0 {
+			t.Errorf("empty bucket %s has a child table of %d bits, want none", p, got)
 		}
 	}
 	rng := rand.New(rand.NewPCG(1, 2))
@@ -523,20 +557,25 @@ func TestV6IndexDeepBucket(t *testing.T) {
 		extra = append(extra, key16(0x2a02_abcd<<32|rng.Uint64()>>38, rng.Uint64())) // the cluster
 	}
 	checkV6(t, d, r, extra...)
+	// The cluster is split again below the bucket's child table.
+	if p := v6PathBits(r, 0x2a02_abcd<<32|0x1234<<8); len(p) < 3 {
+		t.Errorf("the cluster in 2a02:abcd::/32 has table bits %v, want 3 levels or more", p)
+	}
+	checkV6Index(t, r, 20_000)
 }
 
 func TestV6IndexBelowFirstStart(t *testing.T) {
-	// The first start is deep inside a bucket with a level-2 table, so the
+	// The first start is deep inside a bucket with a child table, so the
 	// keys below it fall in an earlier slot of that bucket or in earlier,
 	// empty buckets: none of them is covered.
 	var starts [][16]byte
-	for j := uint64(0); j < 100; j++ {
+	for j := range uint64(2*v6SplitStarts + 1) {
 		starts = append(starts, key16(0x2a02_1234<<32|j<<16, 0))
 	}
 	d := v6DB(starts)
 	r := openDB(t, d)
-	if l2Bits(r, "2a02::/16") == 0 {
-		t.Fatal("2a02::/16 has no level-2 table")
+	if childBits(r, "2a02::/16") == 0 {
+		t.Fatal("2a02::/16 has no child table")
 	}
 	for _, s := range []string{"::", "::1", "1::", "2a01:ffff:ffff:ffff:ffff:ffff:ffff:ffff", "2a02::",
 		"2a02:1000::", "2a02:1233:ffff:ffff:ffff:ffff:ffff:ffff"} {
@@ -556,7 +595,7 @@ func TestV6IndexLastAddress(t *testing.T) {
 	for _, withLast := range []bool{false, true} {
 		t.Run(fmt.Sprintf("start at the last address=%v", withLast), func(t *testing.T) {
 			starts := [][16]byte{{}}
-			starts = append(starts, slotEdgeStarts(0xffff, 3)[1:]...)
+			starts = append(starts, slotEdgeStarts(0xffff, splitK+1)[1:]...)
 			if withLast {
 				starts[len(starts)-1] = ones // replaces the slot's last-address start
 			} else {
@@ -564,28 +603,33 @@ func TestV6IndexLastAddress(t *testing.T) {
 			}
 			d := v6DB(starts)
 			r := openDB(t, d)
-			if got := l2Bits(r, "ffff::/16"); got == 0 {
-				t.Fatal("ffff::/16 has no level-2 table")
+			if got := childBits(r, "ffff::/16"); got == 0 {
+				t.Fatal("ffff::/16 has no child table")
 			}
 			want := uint32(len(starts))
 			if got := r.search6(math.MaxUint64, math.MaxUint64); got != want {
 				t.Errorf("search6(ffff:...:ffff) = %d, want %d, the last range", got, want)
 			}
-			checkV6(t, d, r, add16(ones, -1), fillFrom(ones, 19, 0))
+			extra := [][16]byte{add16(ones, -1)}
+			for _, bit := range v6PathBits(r, math.MaxUint64) {
+				extra = append(extra, fillFrom(ones, bit, 0), add16(fillFrom(ones, bit, 0), -1))
+			}
+			checkV6(t, d, r, extra...)
 		})
 	}
 }
 
 func TestV6IndexEmptyBuckets(t *testing.T) {
-	// Populated buckets 2001::/16 and 2a02::/16 with level-2 tables, and
+	// Populated buckets 2001::/16 and 2a02::/16 with child tables, and
 	// 0db8::/16 with one start, around runs of empty buckets: a key in an
 	// empty bucket belongs to the last range of the populated bucket before it.
+	k1, k2 := splitK, splitK+1
 	starts := [][16]byte{a16("db8::")}
-	starts = append(starts, slotEdgeStarts(0x2001, 2)...)
-	starts = append(starts, slotEdgeStarts(0x2a02, 3)...)
+	starts = append(starts, slotEdgeStarts(0x2001, k1)...)
+	starts = append(starts, slotEdgeStarts(0x2a02, k2)...)
 	d := v6DB(starts)
 	r := openDB(t, d)
-	last2001 := uint32(1 + 8<<2)
+	last2001 := uint32(1 + 8<<k1)
 	cases := []struct {
 		ip   string
 		want uint32
@@ -610,24 +654,24 @@ func TestV6IndexEmptyBuckets(t *testing.T) {
 		}
 	}
 	for _, p := range []string{"::/16", "db8::/16", "2002::/16", "2400::/16", "2a01::/16", "ffff::/16"} {
-		if got := l2Bits(r, p); got != 0 {
-			t.Errorf("%s has %d level-2 bits, want 0", p, got)
+		if got := childBits(r, p); got != 0 {
+			t.Errorf("%s has a child table of %d bits, want none", p, got)
 		}
 	}
-	if l2Bits(r, "2001::/16") != 2 || l2Bits(r, "2a02::/16") != 3 {
-		t.Errorf("level-2 bits: 2001::/16 %d, 2a02::/16 %d; want 2 and 3", l2Bits(r, "2001::/16"), l2Bits(r, "2a02::/16"))
+	if childBits(r, "2001::/16") != k1 || childBits(r, "2a02::/16") != k2 {
+		t.Errorf("child table bits: 2001::/16 %d, 2a02::/16 %d; want %d and %d", childBits(r, "2001::/16"), childBits(r, "2a02::/16"), k1, k2)
 	}
 	checkV6(t, d, r)
 }
 
-func TestV6L2Bits(t *testing.T) {
+func TestV6TableBits(t *testing.T) {
 	cases := []struct{ count, want int }{
 		{0, 0}, {1, 0}, {8, 0}, {9, 1}, {16, 1}, {17, 2}, {64, 3}, {65, 4},
 		{8 << 15, 15}, {8<<15 + 1, 16}, {8 << 16, 16}, {8<<16 + 1, 16}, {1 << 30, 16},
 	}
 	for _, c := range cases {
-		if got := v6L2Bits(c.count); got != c.want {
-			t.Errorf("v6L2Bits(%d) = %d, want %d", c.count, got, c.want)
+		if got := v6TableBits(c.count); got != c.want {
+			t.Errorf("v6TableBits(%d) = %d, want %d", c.count, got, c.want)
 		}
 	}
 }

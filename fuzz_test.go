@@ -55,7 +55,7 @@ func fuzzDBs() []*testDB {
 	}
 	out = append(out, d)
 
-	// Many starts in one top-16 bucket, so that it gets a level-2 table:
+	// Many starts in one top-16 bucket, so that it gets a child table:
 	// starts on multiples of 2^40 (some of them slot edges), starts just
 	// below others, and pairs that share their top 64 bits. Then a last
 	// range in the last bucket.
@@ -216,9 +216,9 @@ func checkIndex(t *testing.T, r *Reader) {
 	for i := 0; i < n6 && i < maxStarts; i++ {
 		s := starts6[i]
 		keys6 = append(keys6, add16(s, -1), s, add16(s, 1), fillFrom(s, 64, 0), fillFrom(s, 64, 0xFF))
-		// The edges of the start's top-16 bucket and of its level-2 slot.
-		k := int(r.v6dir[binary.BigEndian.Uint16(s[:2])] & v6KMask)
-		for _, bit := range []int{v6IdxBits, v6IdxBits + k} {
+		// The edges of the start's top-16 bucket and of each slot on the
+		// way to its leaf slot.
+		for _, bit := range v6PathBits(r, binary.BigEndian.Uint64(s[:8])) {
 			lo, hi := fillFrom(s, bit, 0), fillFrom(s, bit, 0xFF)
 			keys6 = append(keys6, lo, add16(lo, -1), hi, add16(hi, 1))
 		}

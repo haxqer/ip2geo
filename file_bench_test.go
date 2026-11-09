@@ -3,6 +3,7 @@ package ip2geo
 import (
 	"encoding/binary"
 	"fmt"
+	"math/bits"
 	"math/rand/v2"
 	"net/netip"
 	"os"
@@ -66,16 +67,52 @@ func indexSizes(r *Reader) string {
 	for _, s := range r.strings {
 		strBytes += len(s)
 	}
-	flagged := 0
-	for _, e := range r.v6l2 {
-		if e&v6SlotExc != 0 {
-			flagged++
-		}
-	}
-	return fmt.Sprintf("lo4 %d B, v6dir %d B, v6l2 %d B (%d slots, %d with exceptions), exception bitmap %d B (%d exceptions), strings %d B + %d headers (%d B); sections %d B",
-		len(r.lo4)*4, len(r.v6dir)*4, len(r.v6l2)*4, len(r.v6l2)-1, flagged, len(r.v6exc)*8, len(r.v6excIdx)/4,
+	st := v6IndexStats(r)
+	return fmt.Sprintf("lo4 %d B, v6tab %d B (%d child tables, depth %d, %d leaves, %d with exceptions; per start: %.2f levels, %.2f search steps; largest leaf %d starts), exception bitmap %d B (%d exceptions), strings %d B + %d headers (%d B); sections %d B",
+		len(r.lo4)*4, len(r.v6tab)*4, st.tables, st.depth, st.leaves, st.excLeaves, st.levels, st.steps, st.maxLeaf,
+		len(r.v6exc)*8, len(r.v6excIdx)/4,
 		strBytes, len(r.strings), len(r.strings)*16,
 		len(r.records)+len(r.v4idx)+len(r.v4starts)+len(r.v4ids)+len(r.v6hi)+len(r.v6ids)+len(r.v6excIdx)+len(r.v6excLo))
+}
+
+// v6Stats describes the IPv6 tree of tables: levels and steps are the
+// tables a lookup of a start reads and the binary search steps it takes in
+// its leaf (ceil(log2(c+1)) for a leaf of c starts), averaged over the
+// starts.
+type v6Stats struct {
+	tables, depth, leaves, excLeaves, maxLeaf int
+	levels, steps                             float64
+}
+
+func v6IndexStats(r *Reader) v6Stats {
+	var st v6Stats
+	t := r.v6tab
+	var walk func(o, k, depth int)
+	walk = func(o, k, depth int) {
+		st.depth = max(st.depth, depth)
+		for s := range 1 << k {
+			e := t[o+s]
+			if e&v6SlotChild != 0 {
+				st.tables++
+				walk(int(e&v6ChildOffMask), int(e>>v6ChildKShift&0xF)+1, depth+1)
+				continue
+			}
+			c := r.v6First(t[o+s+1]) - int(e&v6SlotIdxMask)
+			st.leaves++
+			if e&v6SlotExc != 0 {
+				st.excLeaves++
+			}
+			st.maxLeaf = max(st.maxLeaf, c)
+			st.levels += float64(c * depth)
+			st.steps += float64(c * bits.Len(uint(c)))
+		}
+	}
+	walk(0, v6IdxBits, 1)
+	if n := len(r.v6hi) / 8; n > 0 {
+		st.levels /= float64(n)
+		st.steps /= float64(n)
+	}
+	return st
 }
 
 // BenchmarkLookupFile measures Open and Lookup on the database file named

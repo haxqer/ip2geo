@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"net/netip"
 	"runtime"
+	"sort"
 
 	"github.com/haxqer/ip2geo/internal/format"
 )
@@ -16,22 +17,46 @@ const (
 	v6IdxBits = 16
 )
 
-// The IPv6 index has a second level inside each populated top-16 bucket,
-// over the next k bits. k grows with the bucket so that its starts spread to
-// about v6SlotStarts per level-2 slot, and is at most v6MaxL2Bits. An entry
-// of Reader.v6dir packs the bucket's offset into v6l2 above v6KBits bits of k.
+// The IPv6 index, Reader.v6tab, is a tree of tables over the top halves of
+// the starts, built at open. A table splits the addresses of its parent slot
+// into 2^k slots on the k bits that follow the parent's; the root,
+// v6tab[:1<<v6IdxBits+1], splits all of them on the top 16 bits. A slot that
+// holds more than v6SplitStarts starts gets a child table, of
+// v6TableBits(count) bits so that its starts spread to about v6SlotStarts
+// per slot, unless its starts all share their top half (no split can
+// separate them), the bits run out at 64, or v6tab would reach
+// v6MaxEntries. Each table has an entry per slot and one more, the end of
+// its last slot, and the tables are appended in depth-first order.
+//
+// A leaf of at most 64 starts spans at most 8 cache lines of V6STARTS. On
+// the city databases a lookup then reads about three tables and takes about
+// four search steps, against two tables and about eleven steps for a top-16
+// bucket split once; a split at 32 or 128 starts measured the same speed,
+// with more memory and a slower open below 64 and longer leaves above.
 const (
-	v6SlotStarts = 8
-	v6MaxL2Bits  = 16
-	v6KBits      = 5
-	v6KMask      = 1<<v6KBits - 1
+	v6SplitStarts  = 64
+	v6SlotStarts   = 8
+	v6MaxTableBits = 16
+	v6MaxEntries   = 1 << 26
 )
 
-// A v6l2 entry holds the index of the first start of its slot in the low 31
-// bits, and v6SlotExc when one of the slot's starts is an exception.
+// A v6tab entry is one of:
+//   - a leaf: the index of the first start of its slot in the low 30 bits,
+//     and v6SlotExc when one of the slot's starts is an exception;
+//   - a child: v6SlotChild, k-1 in the 4 bits at v6ChildKShift and the
+//     offset of the slot's child table in the low 26 bits. The slot's first
+//     start is then that of the child's slot 0.
+//
+// The entry after a leaf's starts its next slot (or ends the table), so a
+// leaf slot's starts run from its index to that entry's first start. A
+// start index is below 2^28 (a GEO2 start takes at least 9 bytes, a GEO1
+// one 20, of an input below maxFileSize = 2^31) and fits the 30 bits.
 const (
-	v6SlotExc     = 1 << 31
-	v6SlotIdxMask = v6SlotExc - 1
+	v6SlotExc      = 1 << 31
+	v6SlotChild    = 1 << 30
+	v6SlotIdxMask  = v6SlotChild - 1
+	v6ChildKShift  = 26
+	v6ChildOffMask = 1<<v6ChildKShift - 1
 )
 
 // Reader is a read-only handle to a compact database. It is safe for
@@ -72,20 +97,14 @@ type Reader struct {
 
 	// IPv6: V6STARTS (the top 64 bits of each start), V6IDS, and the
 	// exception table V6EXCIDX/V6EXCLO holding the non-zero low halves.
-	// v6exc has bit i set when start i is an exception. v6dir[g] describes
-	// top-16 bucket g: its level-2 table is v6l2[o:o+1<<k], o = v6dir[g]>>v6KBits
-	// and k = v6dir[g]&v6KMask, and v6l2[o+s]&v6SlotIdxMask is the index of the
-	// first start in slot s (the k bits after the top 16). The tables are laid
-	// end to end and end with nV6, so a slot's starts run from its entry to the
-	// next one. An entry also has v6SlotExc set when its slot holds an
-	// exception.
+	// v6exc has bit i set when start i is an exception. v6tab is the tree
+	// of tables over the top halves described above v6SplitStarts.
 	v6hi     []byte
 	v6ids    []byte
 	v6excIdx []byte
 	v6excLo  []byte
 	v6exc    []uint64
-	v6dir    *[1 << v6IdxBits]uint32
-	v6l2     []uint32
+	v6tab    []uint32
 
 	// Revision 2.1: the field sets, XRECORDS (one entry of xl.Width bytes
 	// per record) and its layout. A GEO1 database, and a GEO2 one without
@@ -222,8 +241,8 @@ func (r *Reader) search4(key uint32) uint32 {
 }
 
 // search6 returns the record id of the range holding the IPv6 key hi:lo, or
-// 0 when the key is below the first start. Every start before the key's
-// level-2 slot has a smaller top half than the key and every start after it a
+// 0 when the key is below the first start. Every start before the key's leaf
+// slot has a smaller top half than the key and every start after it a
 // larger one, so the binary search over the top halves covers the slot
 // alone: it finds the last start i whose top half is <= hi. Starts sharing
 // the key's top half are ordered by their low half, which is 0 except for
@@ -231,10 +250,9 @@ func (r *Reader) search4(key uint32) uint32 {
 // while start i has the key's top half and a low half above lo. A start
 // before the slot has a smaller top half, so the step back stays in it.
 func (r *Reader) search6(hi, lo uint64) uint32 {
-	d := r.v6dir[hi>>(64-v6IdxBits)]
-	s := d>>v6KBits + uint32(v6Slot(hi, d&v6KMask))
-	e := r.v6l2[s]
-	l, h := int(e&v6SlotIdxMask), int(r.v6l2[s+1]&v6SlotIdxMask)
+	s := r.v6Leaf(hi)
+	e := r.v6tab[s]
+	l, h := int(e&v6SlotIdxMask), r.v6First(r.v6tab[s+1])
 	first := l
 	v := r.v6hi
 	for l < h {
@@ -253,6 +271,31 @@ func (r *Reader) search6(hi, lo uint64) uint32 {
 		return 0
 	}
 	return format.ReadID(r.v6ids, r.idWidth, i)
+}
+
+// v6Leaf returns the position in v6tab of the leaf entry of the slot holding
+// the top half hi: it walks down from the root, each child table taking the
+// k bits after the pos bits its ancestors took. The build keeps pos+k <= 64.
+func (r *Reader) v6Leaf(hi uint64) uint {
+	t := r.v6tab
+	s := uint(hi >> (64 - v6IdxBits))
+	pos := uint(v6IdxBits)
+	for e := t[s]; e&v6SlotChild != 0; e = t[s] {
+		k := uint(e>>v6ChildKShift&0xF) + 1
+		s = uint(e&v6ChildOffMask) + uint(hi<<(pos&63)>>((64-k)&63))
+		pos += k
+	}
+	return s
+}
+
+// v6First returns the index of the first start of the slot with entry e,
+// the entry after a leaf's: e's own index, or that of the first slot of its
+// child table when e has one.
+func (r *Reader) v6First(e uint32) int {
+	for e&v6SlotChild != 0 {
+		e = r.v6tab[e&v6ChildOffMask]
+	}
+	return int(e & v6SlotIdxMask)
 }
 
 // v6StepBack returns the last start at or before i that is <= hi:lo, given
@@ -310,8 +353,8 @@ func (r *Reader) decode(id uint32, rec *Record) {
 }
 
 // buildIndex builds the in-memory indexes over validated sections: the
-// top-20 IPv4 table, the two-level IPv6 table and the IPv6 exception bitmap,
-// and flags the level-2 slots that hold an exception.
+// top-20 IPv4 table, the IPv6 tree of tables and the IPv6 exception bitmap,
+// and flags the leaf slots that hold an exception.
 func (r *Reader) buildIndex() {
 	le := binary.LittleEndian
 	r.buildIndex4()
@@ -321,9 +364,7 @@ func (r *Reader) buildIndex() {
 	for j := 0; j < len(r.v6excIdx); j += 4 {
 		i := le.Uint32(r.v6excIdx[j:])
 		exc[i>>6] |= 1 << (i & 63)
-		hi := le.Uint64(r.v6hi[i*8:])
-		d := r.v6dir[hi>>(64-v6IdxBits)]
-		r.v6l2[d>>v6KBits+uint32(v6Slot(hi, d&v6KMask))] |= v6SlotExc
+		r.v6tab[r.v6Leaf(le.Uint64(r.v6hi[i*8:]))] |= v6SlotExc
 	}
 	r.v6exc = exc
 }
@@ -349,64 +390,164 @@ func (r *Reader) buildIndex4() {
 	r.lo4 = lo4
 }
 
-// buildIndex6 constructs the two-level IPv6 table described at Reader.v6dir
-// over the top halves of the starts.
+// buildIndex6 builds the IPv6 tree of tables described above v6SplitStarts
+// over the top halves of the starts. It counts the entries first, so that
+// v6tab is allocated once, at its final size: count and table split the
+// same slots in the same order, both through childBits.
 func (r *Reader) buildIndex6() {
-	le := binary.LittleEndian
-	v := r.v6hi
-	n := len(v) / 8
-	top := func(i int) uint64 { return le.Uint64(v[i*8:]) >> (64 - v6IdxBits) }
-	dir := new([1 << v6IdxBits]uint32)
-
-	// Size each bucket's level-2 table from the number of starts in it. A
-	// bucket of c > v6SlotStarts starts gets fewer than c/4 slots, so there
-	// are fewer than 2^16 + n/4 in all: under 2^27 for any input below
-	// maxFileSize (a GEO2 start takes at least 9 bytes, a GEO1 one 20, so
-	// n < 2^31/9 < 2^28), which leaves v6KBits bits for k in a uint32, and n
-	// fits the 31 index bits of a v6l2 entry.
-	slots, i := 0, 0
-	for g := range dir {
-		j := i
-		for j < n && top(j) == uint64(g) {
-			j++
-		}
-		k := v6L2Bits(j - i)
-		dir[g] = uint32(slots)<<v6KBits | uint32(k)
-		slots += 1 << k
-		i = j
-	}
-	l2 := make([]uint32, slots+1)
-	i = 0
-	for g, d := range dir {
-		o, k := int(d>>v6KBits), d&v6KMask
-		for s := range 1 << k {
-			for i < n && top(i) == uint64(g) && v6Slot(le.Uint64(v[i*8:]), k) < uint64(s) {
-				i++
-			}
-			l2[o+s] = uint32(i)
-		}
-		for i < n && top(i) == uint64(g) {
-			i++
-		}
-	}
-	l2[slots] = uint32(n)
-	r.v6dir, r.v6l2 = dir, l2
+	n := len(r.v6hi) / 8
+	b := v6Builder{v: r.v6hi}
+	b.count(0, v6IdxBits, 0, n)
+	b.t, b.n = make([]uint32, b.n), 0
+	b.table(0, v6IdxBits, 0, n)
+	r.v6tab = b.t
 }
 
-// v6L2Bits returns the level-2 bits for a top-16 bucket holding count range
-// starts: ceil(log2(count/v6SlotStarts)), clamped to [0, v6MaxL2Bits].
-func v6L2Bits(count int) int {
+// v6Builder lays out the tables of the IPv6 index in t.
+type v6Builder struct {
+	v []byte   // V6STARTS
+	t []uint32 // the tables
+	n int      // the entries laid out (or counted) so far
+}
+
+// hi returns the top half of start i.
+func (b *v6Builder) hi(i int) uint64 { return binary.LittleEndian.Uint64(b.v[i*8:]) }
+
+// table lays out at offset n the table that splits starts a:z, which share
+// their top pos bits, on the next k bits, followed by the child tables of
+// its crowded slots, and returns its offset.
+func (b *v6Builder) table(pos, k uint, a, z int) uint32 {
+	o := b.n
+	b.n += 1<<k + 1
+	tab := b.t[o:b.n]
+	b.fill(tab, pos, k, a, z)
+	b.split(tab, pos, k)
+	return uint32(o)
+}
+
+// fill sets the 2^k+1 entries of tab, which must be zero, to the first start
+// of each slot of starts a:z on the k bits after the pos bits they share, and
+// the last one to z.
+func (b *v6Builder) fill(tab []uint32, pos, k uint, a, z int) {
+	sh := 64 - k
+	if z-a > v6SlotStarts<<k {
+		// More starts per slot than v6TableBits aims at, as in the root: a
+		// binary search for each slot that does not start where the one
+		// before it ends.
+		i := a
+		for s := range uint64(1) << k {
+			if i < z && b.hi(i)<<pos>>sh < s {
+				i += sort.Search(z-i, func(j int) bool { return b.hi(i+j)<<pos>>sh >= s })
+			}
+			tab[s] = uint32(i)
+		}
+		tab[1<<k] = uint32(z)
+		return
+	}
+	// Entry s+1 starts out as the end of slot s when that slot holds a start
+	// and 0 when it is empty; then each entry not set takes the one before
+	// it. Neither loop branches on the data.
+	v := b.v[a*8 : z*8]
+	for j := 0; j+8 <= len(v); j += 8 {
+		tab[binary.LittleEndian.Uint64(v[j:j+8])<<pos>>sh+1] = uint32(a + j/8 + 1)
+	}
+	for s, m := 0, uint32(a); s < len(tab); s++ {
+		m = max(m, tab[s])
+		tab[s] = m
+	}
+}
+
+// split lays out the child tables of the crowded slots of tab, a table on
+// the k bits after pos, and points the slots' entries at them.
+func (b *v6Builder) split(tab []uint32, pos, k uint) {
+	// Slot s+1 still holds its first start when slot s is split.
+	for s := range 1 << k {
+		l, h := int(tab[s]), int(tab[s+1])
+		if h-l <= v6SplitStarts {
+			continue // the common case, checked here before the call
+		}
+		if ck := b.childBits(pos+k, l, h); ck != 0 {
+			c := b.table(pos+k, ck, l, h)
+			tab[s] = v6SlotChild | uint32(ck-1)<<v6ChildKShift | c
+		}
+	}
+}
+
+// count adds to n the entries that table(pos, k, a, z) lays out, without
+// laying them out: it splits the same slots in the same order. Rather than
+// read every start, it reads every q-th one from a, q = v6SplitStarts/2: a
+// slot of more than v6SplitStarts starts holds two of these in a row, so
+// only where two in a row share a slot does it search for the slot's ends.
+func (b *v6Builder) count(pos, k uint, a, z int) {
+	const q = v6SplitStarts / 2
+	b.n += 1<<k + 1
+	sh := 64 - k
+	for i := a; i+q < z; {
+		s := b.hi(i) << pos >> sh
+		if b.hi(i+q)<<pos>>sh != s {
+			i += q
+			continue
+		}
+		// The start q before i is in an earlier slot (or before a), else
+		// the search would have stopped there.
+		l := b.first(pos, sh, max(a, i-q+1), i, s)
+		h, step := i+q, q
+		for h+step < z && b.hi(h+step)<<pos>>sh == s {
+			h += step
+			step *= 2
+		}
+		h = b.first(pos, sh, h+1, min(h+step, z), s+1)
+		if ck := b.childBits(pos+k, l, h); ck != 0 {
+			b.count(pos+k, ck, l, h)
+		}
+		i = a + (h-a+q-1)/q*q
+	}
+}
+
+// first returns the first of starts lo to hi-1 whose slot, bits pos to
+// 64-sh, is t or above, or hi when there is none. Its steps do not branch on
+// the data.
+func (b *v6Builder) first(pos, sh uint, lo, hi int, t uint64) int {
+	n := hi - lo
+	if n <= 0 {
+		return lo
+	}
+	for n > 1 {
+		half := n / 2
+		if b.hi(lo+half)<<pos>>sh < t {
+			lo += half
+		}
+		n -= half
+	}
+	if b.hi(lo)<<pos>>sh < t {
+		lo++
+	}
+	return lo
+}
+
+// childBits returns the bits of the child table of the slot of starts l:h,
+// which share their top pos bits, or 0 when the slot is a leaf: it holds at
+// most v6SplitStarts starts, or its starts share their top half, or pos is
+// 64, or the table would take v6tab past v6MaxEntries.
+func (b *v6Builder) childBits(pos uint, l, h int) uint {
+	if h-l <= v6SplitStarts || pos == 64 || b.hi(l) == b.hi(h-1) {
+		return 0
+	}
+	ck := min(uint(v6TableBits(h-l)), 64-pos)
+	if b.n+1<<ck+1 > v6MaxEntries {
+		return 0
+	}
+	return ck
+}
+
+// v6TableBits returns the bits of the child table of a slot holding count
+// range starts: ceil(log2(count/v6SlotStarts)), clamped to [0, v6MaxTableBits].
+func v6TableBits(count int) int {
 	k := 0
-	for k < v6MaxL2Bits && count > v6SlotStarts<<k {
+	for k < v6MaxTableBits && count > v6SlotStarts<<k {
 		k++
 	}
 	return k
-}
-
-// v6Slot returns the k bits that follow the top 16 bits of hi, the level-2
-// slot of hi in its bucket. k is at most v6MaxL2Bits; for k == 0 it is 0.
-func v6Slot(hi uint64, k uint32) uint64 {
-	return hi << v6IdxBits >> 1 >> ((63 - k) & 63)
 }
 
 // less128 reports whether the 128-bit value ahi:alo is below bhi:blo.
