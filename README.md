@@ -31,9 +31,8 @@ region, city, coordinates, accuracy and time zone; `City()` decodes more
 (postal code, every subdivision, registered country, all languages).
 Reproduce it with [`bench/`](bench) — see below.
 
-IPv6 lookups inside the source's networks take about 38 ns on the country
-profile and about 135 ns on the city profile, where a few very dense /32
-prefixes dominate the search.
+IPv6 lookups inside the source's networks take about 34 ns on the country
+profile and about 110 ns on the city profile.
 
 ## Install
 
@@ -243,7 +242,7 @@ db.Close()                            // a no-op today
   for concurrent use by multiple goroutines. `Close` is a no-op: it may overlap
   in-flight lookups, and the Reader keeps answering after it.
 - **Memory.** A GEO2 file stays mapped; for the city file `Open` adds about
-  9.4 MB of heap (indexes and strings). The garbage collector unmaps the file
+  11 MB of heap (indexes and strings). The garbage collector unmaps the file
   once the Reader is unreachable. Never rewrite a mapped file in place: write a
   new one and rename it over the old, as `mmdb.Build` does.
 - **Errors.** `ip2geo.Open` and `OpenBytes` validate the whole file, including
