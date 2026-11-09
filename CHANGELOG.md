@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.3.3] - 2026-11-09
+
 ### Changed
 - The IPv6 index built at open splits crowded slots again: a slot of more
   than 64 starts gets a child table over the next bits, down to bit 64 if
@@ -235,7 +237,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   failed build never leaves a partial output file.
 - The CLI validates `-latscale` instead of truncating it to 8 bits.
 
-[Unreleased]: https://github.com/haxqer/ip2geo/compare/v0.3.2...HEAD
+[Unreleased]: https://github.com/haxqer/ip2geo/compare/v0.3.3...HEAD
+[0.3.3]: https://github.com/haxqer/ip2geo/compare/v0.3.2...v0.3.3
 [0.3.2]: https://github.com/haxqer/ip2geo/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/haxqer/ip2geo/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/haxqer/ip2geo/compare/v0.2.0...v0.3.0
