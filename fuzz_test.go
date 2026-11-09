@@ -162,9 +162,13 @@ func add16(k [16]byte, delta int) [16]byte {
 // sections as docs/FORMAT.md defines them.
 func checkIndex(t *testing.T, r *Reader) {
 	const maxStarts = 256
-	decode := r.decode
+	decodeInto := r.decode
 	if r.alt { // an ASN database or another language
-		decode = r.decodeAlt
+		decodeInto = r.decodeAlt
+	}
+	decode := func(id uint32) (rec Record) {
+		decodeInto(id, &rec)
+		return rec
 	}
 	starts4 := refStarts4(r)
 	ref4 := func(k uint32) uint32 {

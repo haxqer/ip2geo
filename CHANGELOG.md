@@ -6,6 +6,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+- `Lookup` and `LookupDetails` decode the record in place instead of copying
+  it out of a helper: on DB-IP Lite 2026-10, IPv4 lookups are 25–36% faster
+  and IPv6 lookups 7–28% faster (Apple M3), still without allocating.
+
 ## [0.3.1] - 2026-11-08
 
 ### Fixed

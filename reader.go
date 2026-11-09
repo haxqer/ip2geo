@@ -153,11 +153,13 @@ func (r *Reader) Lookup(ip netip.Addr) (rec Record, ok bool) {
 			id = r.search6(binary.BigEndian.Uint64(a[:8]), binary.BigEndian.Uint64(a[8:]))
 		}
 	}
+	// rec is still the zero Record: decode fills it in place, so the record
+	// is written once, straight into the result.
 	if id != 0 {
 		if r.alt {
-			rec = r.decodeAlt(id)
+			r.decodeAlt(id, &rec)
 		} else {
-			rec = r.decode(id)
+			r.decode(id, &rec)
 		}
 		ok = true
 	}
@@ -277,14 +279,16 @@ func (r *Reader) v6ExcLo(i int) uint64 {
 	return binary.LittleEndian.Uint64(r.v6excLo[l*8 : l*8+8])
 }
 
-// decode reads packed record id. Every string id in it was checked against
-// the string table at open. The record is read through array pointers, so
-// that its fields need no bounds checks of their own.
-func (r *Reader) decode(id uint32) Record {
+// decode reads packed record id into rec, which must be zero: it sets the
+// fields of r's profile and leaves the others alone. Decoding in place
+// rather than returning a Record spares Lookup a copy of the whole struct.
+// Every string id in the record was checked against the string table at
+// open. The record is read through array pointers, so that its fields need
+// no bounds checks of their own.
+func (r *Reader) decode(id uint32, rec *Record) {
 	le := binary.LittleEndian
 	off := int(id) * r.recWidth
 	c := (*[format.RecWidthCountry]byte)(r.records[off : off+format.RecWidthCountry])
-	var rec Record
 	rec.CountryISO = r.strings[le.Uint16(c[format.RecCountryISO:])]
 	rec.CountryName = r.strings[le.Uint16(c[format.RecCountryName:])]
 	rec.Continent = r.strings[le.Uint16(c[format.RecContinent:])]
@@ -303,7 +307,6 @@ func (r *Reader) decode(id uint32) Record {
 		rec.AccuracyRadius = le.Uint16(y[format.RecAccuracy:])
 		rec.TimeZone = r.strings[le.Uint16(y[format.RecTimeZone:])]
 	}
-	return rec
 }
 
 // buildIndex builds the in-memory indexes over validated sections: the

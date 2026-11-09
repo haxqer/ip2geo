@@ -431,7 +431,9 @@ func checkV6(t *testing.T, d *testDB, r *Reader, extra ...[16]byte) {
 		if _, isV4 := embeddedV4(&k); isV4 || a.Is4In6() {
 			continue // Lookup answers from the IPv4 table
 		}
-		if rec, ok := r.Lookup(a); ok != (want != 0) || rec != r.decode(want) {
+		var wantRec Record
+		r.decode(want, &wantRec)
+		if rec, ok := r.Lookup(a); ok != (want != 0) || rec != wantRec {
 			t.Fatalf("Lookup(%v) = %+v, %v; want record %d", a, rec, ok, want)
 		}
 	}

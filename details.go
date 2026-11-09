@@ -103,18 +103,18 @@ func (r *Reader) find(ip netip.Addr) uint32 {
 	return r.search6(binary.BigEndian.Uint64(a[:8]), binary.BigEndian.Uint64(a[8:]))
 }
 
-// decodeAlt is Lookup's decode when r.alt is set: an empty Record for an
-// ASN database, else the Record with its names in r's language.
-func (r *Reader) decodeAlt(id uint32) Record {
+// decodeAlt is Lookup's decode when r.alt is set: it leaves rec, which must
+// be zero, empty for an ASN database, else decodes the Record into it with
+// its names in r's language.
+func (r *Reader) decodeAlt(id uint32, rec *Record) {
 	if r.profile == ProfileASN {
-		return Record{}
+		return
 	}
-	rec := r.decode(id)
+	r.decode(id, rec)
 	x := r.xentry(id)
 	r.localize(x, format.NameCountry, &rec.CountryName)
 	r.localize(x, format.NameRegion, &rec.RegionName)
 	r.localize(x, format.NameCity, &rec.City)
-	return rec
 }
 
 // xentry returns the XRECORDS entry of record id.
@@ -152,7 +152,7 @@ func (r *Reader) details(id uint32, d *Details) {
 		d.ASN = r.asn(id)
 		return
 	}
-	d.Record = r.decode(id)
+	r.decode(id, &d.Record)
 	if r.xl.Width == 0 {
 		return
 	}
