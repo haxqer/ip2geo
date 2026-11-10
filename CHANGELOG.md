@@ -49,6 +49,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   databases, small synthetic DB-IP-layout CSVs in `csvdb/testdata` and, for
   `mmdb`, a synthetic City `.mmdb` written in code, so they show real output
   on pkg.go.dev.
+- `examples/httpserver`: a small HTTP lookup service (`GET /lookup?ip=`,
+  `GET /info`) that depends on the root module only and hot-reloads its
+  database when the file is replaced (polling) or on `SIGHUP`, swapping an
+  `atomic.Pointer[ip2geo.Reader]`. Its test proves under `-race` that no
+  request fails across reloads and that every retired Reader is released.
 
 ### Changed
 - `github.com/haxqer/ip2geo/mmdb` and `github.com/haxqer/ip2geo/cmd/ip2geo`

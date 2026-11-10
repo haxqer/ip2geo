@@ -281,7 +281,10 @@ db.Close()                            // a no-op today
 
 - **Concurrency.** `Lookup` performs **no allocation** and the `*Reader` is safe
   for concurrent use by multiple goroutines. `Close` is a no-op: it may overlap
-  in-flight lookups, and the Reader keeps answering after it.
+  in-flight lookups, and the Reader keeps answering after it. To replace the
+  database of a running service, swap an `atomic.Pointer[ip2geo.Reader]` and
+  close the old one; [`examples/httpserver`](examples/httpserver) is a small
+  HTTP lookup service that does this on a file change or `SIGHUP`.
 - **Memory.** A GEO2 file stays mapped; for the city file `Open` adds about
   11 MB of heap (indexes and strings). The garbage collector unmaps the file
   once the Reader is unreachable. Never rewrite a mapped file in place: write a
