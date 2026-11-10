@@ -2,6 +2,7 @@ package ip2geo
 
 import (
 	"encoding/binary"
+	"math/bits"
 	"net/netip"
 	"runtime"
 	"sort"
@@ -87,13 +88,17 @@ type Reader struct {
 	strings []string // id -> string over a heap copy of STRBLOB; strings[0] == ""
 	records []byte   // RECORDS: packed records, record 0 all zero
 
-	// IPv4: V4IDX (u32[65537]), V4STARTS (u16 per boundary), V4IDS, and the
-	// top-20 table built at open: lo4[g] is the index of the first boundary
-	// whose absolute start is >= g<<v4Shift, and lo4[1<<v4IdxBits] == nV4.
+	// IPv4: V4IDX (u32[65537]), V4STARTS (u16 per boundary), V4IDS, and two
+	// tables built at open: the top-20 table lo4, where lo4[g] is the index
+	// of the first boundary whose absolute start is >= g<<v4Shift and
+	// lo4[1<<v4IdxBits] == nV4 (so lo4[G<<4] == V4IDX[G] for a top-16
+	// bucket G), and occ4, which marks the top-16 buckets that hold a
+	// boundary (see occWord).
 	v4idx    []byte
 	v4starts []byte
 	v4ids    []byte
 	lo4      *[1<<v4IdxBits + 1]int32
+	occ4     *occ4Map
 
 	// IPv6: V6STARTS (the top 64 bits of each start), V6IDS, and the
 	// exception table V6EXCIDX/V6EXCLO holding the non-zero low halves.
@@ -353,8 +358,8 @@ func (r *Reader) decode(id uint32, rec *Record) {
 }
 
 // buildIndex builds the in-memory indexes over validated sections: the
-// top-20 IPv4 table, the IPv6 tree of tables and the IPv6 exception bitmap,
-// and flags the leaf slots that hold an exception.
+// top-20 IPv4 table and the IPv4 bucket map, the IPv6 tree of tables and the
+// IPv6 exception bitmap, and flags the leaf slots that hold an exception.
 func (r *Reader) buildIndex() {
 	le := binary.LittleEndian
 	r.buildIndex4()
@@ -371,14 +376,19 @@ func (r *Reader) buildIndex() {
 
 // buildIndex4 derives the top-20 table lo4 from V4IDX and the u16 starts:
 // top-16 bucket G holds boundaries V4IDX[G]:V4IDX[G+1], and its 16 top-20
-// sub-buckets split them on the top 4 bits of their u16 value.
+// sub-buckets split them on the top 4 bits of their u16 value. It marks the
+// non-empty buckets in occ4 on the way.
 func (r *Reader) buildIndex4() {
 	const sub = 1 << (v4IdxBits - 16)
 	le := binary.LittleEndian
 	s := r.v4starts
 	lo4 := new([1<<v4IdxBits + 1]int32)
+	occ := new(occ4Map)
 	for g := range 1 << 16 {
 		i, end := int(le.Uint32(r.v4idx[g*4:])), int(le.Uint32(r.v4idx[g*4+4:]))
+		if i < end {
+			occ[g>>6].full |= 1 << (g & 63)
+		}
 		for k := range sub {
 			for i < end && int(le.Uint16(s[i*2:])) < k<<v4Shift {
 				i++
@@ -387,7 +397,41 @@ func (r *Reader) buildIndex4() {
 		}
 	}
 	lo4[1<<v4IdxBits] = int32(len(s) / 2)
-	r.lo4 = lo4
+	occ.link()
+	r.lo4, r.occ4 = lo4, occ
+}
+
+// occ4Map marks the top-16 IPv4 buckets that hold a boundary, 64 to an
+// occWord: bucket G is word G>>6, bit G&63.
+type occ4Map [1 << 10]occWord
+
+// occWord describes the 64 top-16 buckets w<<6 to w<<6|63 of word w: which
+// of them hold a boundary, and the nearest non-empty buckets outside the
+// word, so that the non-empty bucket before or after any bucket is found
+// without scanning an empty run. prev and next are 0 when there is no such
+// bucket; range4 never uses them then.
+type occWord struct {
+	full uint64 // bit b set when bucket w<<6|b holds a boundary
+	prev uint16 // the last non-empty bucket before w<<6
+	next uint16 // the first non-empty bucket after w<<6|63
+}
+
+// link sets prev and next in every word from the full bits.
+func (o *occ4Map) link() {
+	last := 0
+	for w := range o {
+		o[w].prev = uint16(last)
+		if f := o[w].full; f != 0 {
+			last = w<<6 | (63 - bits.LeadingZeros64(f))
+		}
+	}
+	first := 0
+	for w := len(o) - 1; w >= 0; w-- {
+		o[w].next = uint16(first)
+		if f := o[w].full; f != 0 {
+			first = w<<6 | bits.TrailingZeros64(f)
+		}
+	}
 }
 
 // buildIndex6 builds the IPv6 tree of tables described above v6SplitStarts

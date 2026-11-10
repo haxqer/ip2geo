@@ -6,6 +6,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+- IPv4 `LookupRange` no longer binary-searches V4IDX when a range's ends sit
+  in other /16s than the address, which is the usual case on sparse files:
+  a 16 KB map of the non-empty /16s, built at open, finds the neighboring
+  /16 at once. On DB-IP Lite 2026-10 it is 84% faster on the country file
+  (97 → 16 ns, about `Lookup`'s cost) and 52% faster on the city file
+  (75 → 36 ns), with similar gains on a GeoIP2 City build (Apple M3), still
+  without allocating. `Lookup` and IPv6 are unchanged; open takes one more
+  allocation of 16 KB and up to 2% longer. The file format is unchanged.
+
 ## [0.3.3] - 2026-11-09
 
 ### Changed

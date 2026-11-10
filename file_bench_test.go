@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"unsafe"
 )
 
 // readerToGEO2 lays out the in-memory sections of r as a GEO2 fixture, with
@@ -68,8 +69,8 @@ func indexSizes(r *Reader) string {
 		strBytes += len(s)
 	}
 	st := v6IndexStats(r)
-	return fmt.Sprintf("lo4 %d B, v6tab %d B (%d child tables, depth %d, %d leaves, %d with exceptions; per start: %.2f levels, %.2f search steps; largest leaf %d starts), exception bitmap %d B (%d exceptions), strings %d B + %d headers (%d B); sections %d B",
-		len(r.lo4)*4, len(r.v6tab)*4, st.tables, st.depth, st.leaves, st.excLeaves, st.levels, st.steps, st.maxLeaf,
+	return fmt.Sprintf("lo4 %d B, occ4 %d B, v6tab %d B (%d child tables, depth %d, %d leaves, %d with exceptions; per start: %.2f levels, %.2f search steps; largest leaf %d starts), exception bitmap %d B (%d exceptions), strings %d B + %d headers (%d B); sections %d B",
+		len(r.lo4)*4, unsafe.Sizeof(*r.occ4), len(r.v6tab)*4, st.tables, st.depth, st.leaves, st.excLeaves, st.levels, st.steps, st.maxLeaf,
 		len(r.v6exc)*8, len(r.v6excIdx)/4,
 		strBytes, len(r.strings), len(r.strings)*16,
 		len(r.records)+len(r.v4idx)+len(r.v4starts)+len(r.v4ids)+len(r.v6hi)+len(r.v6ids)+len(r.v6excIdx)+len(r.v6excLo))

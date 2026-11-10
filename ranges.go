@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"iter"
 	"math"
+	"math/bits"
 	"net/netip"
 	"runtime"
 
@@ -52,15 +53,64 @@ func (r *Reader) Ranges() iter.Seq2[Range, Details] {
 }
 
 // range4 returns the IPv4 boundary range holding key and its record id.
+//
+// It finds boundary i, the last at or below key, as search4 does. Boundary i
+// is in key's top-16 bucket g unless it is below the bucket's first
+// boundary, lo4[g<<4]; then it is the last boundary of the last non-empty
+// bucket before g. Boundary i+1, the first above key, is in g unless it is at
+// or past the bucket's end, lo4[(g+1)<<4]; then it is the first boundary of
+// the first non-empty bucket after g. Both neighboring buckets come from
+// g's word of occ4: the nearest set bits below and above g, or the word's
+// prev and next when it has none. In a sparse file most top-20 windows are
+// empty and the neighbors of a key's boundaries are in other buckets, so
+// this replaces a search over V4IDX; lo4[g<<4] shares a cache line with the
+// entries the search has just read. The candidates are all computed so that
+// the choices compile to conditional selects: which applies is data
+// dependent and unpredictable.
 func (r *Reader) range4(key uint32) (Range, uint32) {
-	i := r.index4(key)
-	first, last, id := uint32(0), uint32(math.MaxUint32), uint32(0)
-	g := int(key >> 16) // the bucket of both boundaries, most of the time
-	if i >= 0 {
-		first, id = r.start4(i, g), format.ReadID(r.v4ids, r.idWidth, i)
+	le := binary.LittleEndian
+	w := key >> v4Shift
+	l, h := int(r.lo4[w]), int(r.lo4[w+1])
+	k := uint16(key)
+	s := r.v4starts
+	for l < h {
+		mid := int(uint(l+h) >> 1)
+		if le.Uint16(s[mid*2:mid*2+2]) > k {
+			h = mid
+		} else {
+			l = mid + 1
+		}
 	}
-	if i+1 < len(r.v4starts)/2 {
-		last = r.start4(i+1, g) - 1
+	i := l - 1
+
+	g := key >> 16
+	lo, hi := int(r.lo4[g<<4]), int(r.lo4[(g+1)<<4])
+	o := &r.occ4[g>>6]
+	below := o.full & (1<<(g&63) - 1)
+	above := o.full &^ (2<<(g&63) - 1) // 0 for g&63 == 63: the shift wraps
+	inPrev := g&^63 | uint32(63-bits.LeadingZeros64(below))
+	inNext := g&^63 | uint32(bits.TrailingZeros64(above))
+	prev, next := uint32(o.prev), uint32(o.next)
+	if below != 0 {
+		prev = inPrev
+	}
+	if above != 0 {
+		next = inNext
+	}
+	bf, bl := g, g // the buckets of boundaries i and i+1
+	if i < lo {
+		bf = prev
+	}
+	if i+1 >= hi {
+		bl = next
+	}
+
+	first, last, id := uint32(0), uint32(math.MaxUint32), uint32(0)
+	if i >= 0 {
+		first, id = bf<<16|uint32(le.Uint16(s[i*2:])), format.ReadID(r.v4ids, r.idWidth, i)
+	}
+	if i+1 < len(s)/2 {
+		last = bl<<16 | uint32(le.Uint16(s[i*2+2:])) - 1
 	}
 	return Range{addr4(first), addr4(last)}, id
 }
@@ -99,46 +149,6 @@ var v6Aliases = [...]struct{ fh, fl, lh, ll uint64 }{
 	{0, 0xFFFF << 32, 0, 0xFFFF<<32 | (1<<32 - 1)},
 	{0x2001_0000 << 32, 0, 0x2001_0000<<32 | (1<<32 - 1), math.MaxUint64},
 	{0x2002 << 48, 0, 0x2002<<48 | (1<<48 - 1), math.MaxUint64},
-}
-
-// index4 is search4 returning the index of the boundary holding key, -1
-// when key is below the first one.
-func (r *Reader) index4(key uint32) int {
-	g := key >> v4Shift
-	l, h := int(r.lo4[g]), int(r.lo4[g+1])
-	k := uint16(key)
-	s := r.v4starts
-	for l < h {
-		mid := int(uint(l+h) >> 1)
-		if binary.LittleEndian.Uint16(s[mid*2:mid*2+2]) > k {
-			h = mid
-		} else {
-			l = mid + 1
-		}
-	}
-	return l - 1
-}
-
-// start4 returns the absolute start of IPv4 boundary i: its u16 value in
-// the top-16 bucket g with V4IDX[g] <= i < V4IDX[g+1], the last bucket
-// whose first boundary is at or before i. hint is checked first.
-func (r *Reader) start4(i, hint int) uint32 {
-	le := binary.LittleEndian
-	if uint64(le.Uint32(r.v4idx[hint*4:])) <= uint64(i) && uint64(i) < uint64(le.Uint32(r.v4idx[hint*4+4:])) {
-		return uint32(hint)<<16 | uint32(le.Uint16(r.v4starts[i*2:]))
-	}
-	// V4IDX[0] == 0 <= i < V4IDX[65536]: find the first g > 0 with
-	// V4IDX[g] > i.
-	l, h := 1, format.V4IdxEntries-1
-	for l < h {
-		mid := int(uint(l+h) >> 1)
-		if uint64(le.Uint32(r.v4idx[mid*4:])) > uint64(i) {
-			h = mid
-		} else {
-			l = mid + 1
-		}
-	}
-	return uint32(l-1)<<16 | uint32(le.Uint16(r.v4starts[i*2:]))
 }
 
 // index6 is search6 returning the index of the boundary holding hi:lo, -1

@@ -156,10 +156,10 @@ func add16(k [16]byte, delta int) [16]byte {
 	return k
 }
 
-// checkIndex compares the jump-table searches with a plain binary search
-// over the starts, around every start and bucket edge. The reference reads
-// the absolute IPv4 starts and the 128-bit IPv6 starts back from the
-// sections as docs/FORMAT.md defines them.
+// checkIndex compares the jump-table searches, and range4, with a plain
+// binary search over the starts, around every start and bucket edge. The
+// reference reads the absolute IPv4 starts and the 128-bit IPv6 starts back
+// from the sections as docs/FORMAT.md defines them.
 func checkIndex(t *testing.T, r *Reader) {
 	const maxStarts = 256
 	decodeInto := r.decode
@@ -190,6 +190,10 @@ func checkIndex(t *testing.T, r *Reader) {
 		want := ref4(k)
 		if got := r.search4(k); got != want {
 			t.Fatalf("search4(%08x) = %d, want %d", k, got, want)
+		}
+		got, gid := r.range4(k)
+		if rg, id := refRange4(r, starts4, k); got != rg || gid != id {
+			t.Fatalf("range4(%08x) = %v, %d; want %v, %d", k, got, gid, rg, id)
 		}
 		var a [4]byte
 		binary.BigEndian.PutUint32(a[:], k)
