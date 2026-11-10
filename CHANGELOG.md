@@ -42,6 +42,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   stable release; a pre-release publishes `X.Y.Z-rc.N` alone. CI builds the
   image on both platforms and checks a `lookup` against the conformance city
   file.
+- Runnable examples, checked by `go test`, for every entry point of the
+  reader (`Open`, `OpenBytes`, each `Option`, `Lookup`, `LookupDetails`,
+  `ASN`, `LookupRange`, `Ranges`, `Metadata`, `WithLanguage`, `Close`, the
+  error values, ...), of `csvdb` and of `mmdb`. They read the conformance
+  databases, small synthetic DB-IP-layout CSVs in `csvdb/testdata` and, for
+  `mmdb`, a synthetic City `.mmdb` written in code, so they show real output
+  on pkg.go.dev.
 
 ### Changed
 - `github.com/haxqer/ip2geo/mmdb` and `github.com/haxqer/ip2geo/cmd/ip2geo`

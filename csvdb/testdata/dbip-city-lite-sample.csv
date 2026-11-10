@@ -1,0 +1,8 @@
+0.0.0.0,0.255.255.255,ZZ,ZZ,,,0,0
+1.0.0.0,1.0.0.255,XC,QT,"North Testshire",Testville,12.3456,-65.4321
+1.0.1.0,1.0.1.255,XC,QT,"North Testshire",Testville,12.3456,-65.4321
+1.0.2.0,1.0.3.255,XC,QM,,"Southpole Station",-90,180
+1.0.8.0,1.0.8.255,XC,XS,,"Roundington, ""Old Town""",45.12345,-0.0001
+10.0.0.0,10.255.255.255,ZZ,ZZ,,,0,0
+::,1fff:ffff:ffff:ffff:ffff:ffff:ffff:ffff,ZZ,ZZ,,,0,0
+2001:db8::,2001:db8:ffff:ffff:ffff:ffff:ffff:ffff,XC,QT,"North Testshire",Testville,12.3456,-65.4321
