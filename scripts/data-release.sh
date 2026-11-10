@@ -6,6 +6,8 @@
 #   scripts/data-release.sh compat  YYYY-MM OUTDIR   check that the latest released CLI opens the .geoc assets
 #   scripts/data-release.sh exists  YYYY-MM          exit 0 if release data-YYYY-MM exists, 1 if not
 #   scripts/data-release.sh publish YYYY-MM OUTDIR   create GitHub Release data-YYYY-MM from OUTDIR
+#   scripts/data-release.sh latest  [--dry-run] [YYYY-MM]  point release data-latest at data-YYYY-MM (default: the newest)
+#   scripts/data-release.sh prune   [--dry-run]      delete monthly releases and tags beyond the newest DATA_KEEP
 #
 # build and verify need only Go, curl and gzip: no token, no network access
 # beyond download.db-ip.com. compat also fetches the latest released module
@@ -24,6 +26,19 @@
 # downloads, the decompressed City .mmdb and the CLI binary stay in
 # OUTDIR/.work (override with DATA_WORKDIR); a rerun reuses valid downloads.
 #
+# latest and prune use gh the same way. latest keeps one release,
+# data-latest, whose assets are byte-for-byte copies of the newest
+# data-YYYY-MM release (or of the month given) and whose tag points at that
+# release's commit, so .../releases/download/data-latest/<asset> always
+# serves the current month. It is never marked as GitHub's "Latest release".
+# prune keeps the newest DATA_KEEP (default: DEFAULT_KEEP below) published
+# data-YYYY-MM releases, plus the month scripts/size-table.month pins, and
+# deletes older ones together with their tags. prune only ever deletes tags
+# matching MONTHLY_TAG_RE, latest only moves data-latest; v* tags are never
+# touched. Both are idempotent, stop at the first API error, and with
+# --dry-run (or DATA_DRY_RUN=1) make read-only calls only and print what
+# they would change.
+#
 # Exit status: 0 on success, 1 only from exists when the release is absent,
 # 2 on any error (bad arguments, failed download or build, API failure).
 #
@@ -41,6 +56,13 @@ readonly SUMMED=(dbip-country-lite.geoc.gz dbip-region-lite.geoc.gz dbip-city-li
 readonly ASSETS=("${SUMMED[@]}" checksums.txt)
 readonly PROFILES=(country region city)
 
+# The monthly releases' tags; prune touches nothing else. data-latest is the
+# moving alias that latest maintains. DEFAULT_KEEP is the retention policy:
+# the number of newest monthly releases prune keeps unless DATA_KEEP is set.
+readonly MONTHLY_TAG_RE='^data-[0-9]{4}-(0[1-9]|1[0-2])$'
+readonly LATEST_TAG=data-latest
+readonly DEFAULT_KEEP=12
+
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 log() { printf 'data-release: %s\n' "$*" >&2; }
@@ -50,7 +72,7 @@ die() {
 }
 
 usage() {
-	sed -n '2,8p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' >&2
+	sed -n '2,10p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' >&2
 	exit 2
 }
 
@@ -377,18 +399,463 @@ cmd_publish() {
 	log "published release $tag in $repo"
 }
 
+# latest and prune. Every GitHub call goes through gh_get (reads) or
+# gh_change (writes); gh_change is the only place that writes, and in a dry
+# run it only logs. Neither is ever called in a $(...) subshell, so die stops
+# the whole script: an API error fails closed before anything else changes.
+
+dry_run=false
+gh_tmp=""
+
+# tmp_dir: create the scratch directory gh_tmp, removed at exit, once.
+tmp_dir() {
+	if [[ -z $gh_tmp ]]; then
+		gh_tmp="$(mktemp -d "${TMPDIR:-/tmp}/data-release.XXXXXX")"
+		trap 'rm -rf "$gh_tmp"' EXIT
+	fi
+}
+
+is_monthly_tag() { [[ $1 =~ $MONTHLY_TAG_RE ]]; }
+
+# assert_monthly_tag TAG: the last check before anything deletes TAG.
+assert_monthly_tag() {
+	is_monthly_tag "$1" || die "refusing to touch tag '$1': it is not a data-YYYY-MM tag"
+}
+
+# gh_get PATH [JQ] -> 0 with the output in GH_OUT, 1 on HTTP 404; dies on any
+# other error. --paginate concatenates every page (JQ runs on each).
+gh_get() {
+	local path=$1 err
+	tmp_dir
+	local args=(api --paginate "$path")
+	[[ $# -ge 2 ]] && args+=(--jq "$2")
+	if GH_OUT="$(gh "${args[@]}" </dev/null 2>"$gh_tmp/err")"; then
+		return 0
+	fi
+	err="$(cat "$gh_tmp/err")"
+	[[ $err == *"HTTP 404"* ]] && return 1
+	die "GET $path failed: ${err:-gh exited non-zero}"
+}
+
+# gh_change DESCRIPTION -- COMMAND...: run a gh command that changes the
+# repository, or only log it in a dry run. Returns 1 when the command fails
+# with HTTP 404 (the thing is already gone) and dies on any other failure.
+gh_change() {
+	local what=$1 err
+	shift 2
+	if $dry_run; then
+		log "dry-run: would $what"
+		return 0
+	fi
+	tmp_dir
+	log "$what"
+	if "$@" </dev/null >/dev/null 2>"$gh_tmp/err"; then
+		return 0
+	fi
+	err="$(cat "$gh_tmp/err")"
+	[[ $err == *"HTTP 404"* ]] && return 1
+	die "cannot $what: ${err:-gh exited non-zero}"
+}
+
+# list_releases REPO -> RELEASES: one "tag<TAB>draft<TAB>id" line per release,
+# drafts included (the token sees them when it can push).
+list_releases() {
+	gh_get "repos/$1/releases?per_page=100" \
+		'.[] | [.tag_name, (.draft | tostring), (.id | tostring)] | @tsv' ||
+		die "cannot list the releases of $1 (HTTP 404)"
+	RELEASES=$GH_OUT
+}
+
+# published_monthly -> the published data-YYYY-MM releases in RELEASES as
+# "tag<TAB>id", newest month first (the names sort by date). data-latest and
+# v* never match.
+published_monthly() {
+	local tag draft id
+	while IFS=$'\t' read -r tag draft id; do
+		if [[ $draft == false ]] && is_monthly_tag "$tag"; then
+			printf '%s\t%s\n' "$tag" "$id"
+		fi
+	done <<<"$RELEASES" | sort -r
+}
+
+# release_ids TAG DRAFT -> the ids of the releases in RELEASES with TAG whose
+# draft state is DRAFT (true or false), one per line.
+release_ids() {
+	local tag draft id
+	while IFS=$'\t' read -r tag draft id; do
+		if [[ $tag == "$1" && $draft == "$2" ]]; then
+			printf '%s\n' "$id"
+		fi
+	done <<<"$RELEASES"
+}
+
+# tag_commit REPO TAG -> 0 with the commit TAG points at in TAG_COMMIT (an
+# annotated tag is peeled), 1 when the tag does not exist.
+tag_commit() {
+	gh_get "repos/$1/git/ref/tags/$2" '.object.type + " " + .object.sha' || return 1
+	local type=${GH_OUT%% *} sha=${GH_OUT#* }
+	while [[ $type == tag ]]; do
+		gh_get "repos/$1/git/tags/$sha" '.object.type + " " + .object.sha' ||
+			die "tag object $sha of $2 is missing"
+		type=${GH_OUT%% *} sha=${GH_OUT#* }
+	done
+	[[ $type == commit && $sha =~ ^[0-9a-f]{40}$ ]] || die "tag $2 does not point at a commit ($GH_OUT)"
+	TAG_COMMIT=$sha
+}
+
+# release_assets REPO ID -> ASSETS_TSV: "id<TAB>name<TAB>size" per asset of
+# the release, sorted by name.
+release_assets() {
+	gh_get "repos/$1/releases/$2/assets?per_page=100" \
+		'.[] | [(.id | tostring), .name, (.size | tostring)] | @tsv' ||
+		die "release $2 of $1 disappeared"
+	ASSETS_TSV="$(sort -t $'\t' -k2,2 <<<"$GH_OUT")"
+}
+
+# asset_id NAME -> the id of asset NAME in ASSETS_TSV, or nothing.
+asset_id() {
+	local id name
+	while IFS=$'\t' read -r id name _; do
+		if [[ $name == "$1" ]]; then
+			printf '%s\n' "$id"
+			return 0
+		fi
+	done <<<"$ASSETS_TSV"
+}
+
+# check_not_latest REPO: fail if GitHub's "Latest release" (/releases/latest,
+# the badge on the repository page) is a data release, not a v* release.
+check_not_latest() {
+	gh_get "repos/$1/releases/latest" '.tag_name' || return 0 # no Latest release at all
+	if [[ $GH_OUT == data-* ]]; then
+		die "GitHub marks $GH_OUT as the repository's Latest release; restore the newest v* release with: gh release edit <v-tag> --repo $1 --latest"
+	fi
+	log "GitHub's Latest release is still $GH_OUT"
+}
+
+cmd_latest() {
+	local month=${1:-} repo src src_id src_commit src_assets latest_id names f
+	repo="$(gh_repo)"
+	tmp_dir
+	list_releases "$repo"
+
+	# The month to mirror: the one given, else the newest published one.
+	if [[ -n $month ]]; then
+		src="data-$month"
+		src_id="$(published_monthly | awk -F'\t' -v t="$src" '$1 == t { print $2 }')"
+		[[ -n $src_id ]] || die "no published release $src in $repo"
+	else
+		local newest
+		newest="$(published_monthly | head -n 1)"
+		[[ -n $newest ]] || die "no published data-YYYY-MM release in $repo to point $LATEST_TAG at"
+		src=${newest%%$'\t'*} src_id=${newest#*$'\t'}
+	fi
+	assert_monthly_tag "$src"
+	tag_commit "$repo" "$src" || die "release $src has no tag in $repo"
+	src_commit=$TAG_COMMIT
+	release_assets "$repo" "$src_id"
+	src_assets=$ASSETS_TSV
+	[[ -n $src_assets ]] || die "release $src has no assets"
+	names="$(cut -f2 <<<"$src_assets")"
+	grep -qxF checksums.txt <<<"$names" || die "release $src has no checksums.txt"
+	log "mirroring $src (commit ${src_commit:0:12}, $(wc -l <<<"$names" | tr -d ' ') assets) as $LATEST_TAG"
+
+	latest_id="$(release_ids "$LATEST_TAG" false | head -n 1)"
+	local title="Test databases — DB-IP Lite (latest: ${src#data-})"
+
+	# Already current: same commit, title, asset names and sizes, and
+	# checksums.txt. A rerun of data.yml ends here.
+	if [[ -n $latest_id ]] && tag_commit "$repo" "$LATEST_TAG" && [[ $TAG_COMMIT == "$src_commit" ]] &&
+		gh_get "repos/$repo/releases/$latest_id" '.name' && [[ $GH_OUT == "$title" ]]; then
+		release_assets "$repo" "$latest_id"
+		if [[ "$(cut -f2,3 <<<"$ASSETS_TSV")" == "$(cut -f2,3 <<<"$src_assets")" ]]; then
+			gh release download "$src" --repo "$repo" -p checksums.txt -O "$gh_tmp/src.sums" --clobber ||
+				die "cannot download checksums.txt of $src"
+			gh release download "$LATEST_TAG" --repo "$repo" -p checksums.txt -O "$gh_tmp/latest.sums" --clobber ||
+				die "cannot download checksums.txt of $LATEST_TAG"
+			if cmp -s "$gh_tmp/src.sums" "$gh_tmp/latest.sums"; then
+				log "$LATEST_TAG already mirrors $src; nothing to do"
+				check_not_latest "$repo"
+				return 0
+			fi
+		fi
+	fi
+
+	# Download the source assets once and check them before copying.
+	local src_dir="$gh_tmp/src"
+	if $dry_run; then
+		log "dry-run: would download the assets of $src and check them against its checksums.txt"
+	else
+		mkdir -p "$src_dir"
+		gh release download "$src" --repo "$repo" -D "$src_dir" ||
+			die "cannot download the assets of $src"
+		(cd "$src_dir" && sha256 -c checksums.txt >&2) || die "the assets of $src do not match its checksums.txt"
+		while IFS= read -r f; do
+			[[ -s "$src_dir/$f" ]] || die "asset $f of $src was not downloaded"
+		done <<<"$names"
+	fi
+
+	# Point the data-latest tag at the source's commit: force-update it (it
+	# moves every month) or create it.
+	if tag_commit "$repo" "$LATEST_TAG"; then
+		if [[ $TAG_COMMIT != "$src_commit" ]]; then
+			gh_change "move tag $LATEST_TAG from ${TAG_COMMIT:0:12} to ${src_commit:0:12}" -- \
+				gh api -X PATCH "repos/$repo/git/refs/tags/$LATEST_TAG" -f sha="$src_commit" -F force=true ||
+				die "tag $LATEST_TAG disappeared while moving it"
+		fi
+	else
+		gh_change "create tag $LATEST_TAG at ${src_commit:0:12}" -- \
+			gh api -X POST "repos/$repo/git/refs" -f ref="refs/tags/$LATEST_TAG" -f sha="$src_commit" ||
+			die "cannot create tag $LATEST_TAG"
+	fi
+
+	# Release notes: a pointer to the month, then the month's own notes
+	# (file table, usage, CC BY 4.0 attribution).
+	local notes="$gh_tmp/notes.md" server="${GITHUB_SERVER_URL:-https://github.com}"
+	gh_get "repos/$repo/releases/$src_id" '.body // ""' || die "release $src disappeared"
+	{
+		# shellcheck disable=SC2016 # the backticks are Markdown
+		printf '> **Moving alias.** `%s` always serves the newest monthly data release, currently **[%s](%s/%s/releases/tag/%s)**: the same files, byte for byte, re-uploaded and re-tagged every month. Download from `%s` (or another `data-YYYY-MM`) when you need a fixed month.\n\n' \
+			"$LATEST_TAG" "$src" "$server" "$repo" "$src" "$src"
+		printf '%s\n' "$GH_OUT"
+	} >"$notes"
+
+	# A draft left by an interrupted create carries the tag name but serves
+	# nothing; remove it so the create below does not leave a second one.
+	local draft_id
+	while IFS= read -r draft_id; do
+		[[ -n $draft_id ]] || continue
+		gh_change "delete leftover draft release $draft_id ($LATEST_TAG)" -- \
+			gh api -X DELETE "repos/$repo/releases/$draft_id" || true
+	done <<<"$(release_ids "$LATEST_TAG" true)"
+
+	if [[ -z $latest_id ]]; then
+		# First run: create it. gh uploads into a draft and publishes it once
+		# every asset is up; --latest=false keeps GitHub's Latest badge on
+		# the v* code releases.
+		local files=()
+		while IFS= read -r f; do files+=("$src_dir/$f"); done <<<"$names"
+		gh_change "create release $LATEST_TAG with the assets of $src" -- \
+			gh release create "$LATEST_TAG" --repo "$repo" --verify-tag \
+			--title "$title" --notes-file "$notes" --latest=false "${files[@]}" ||
+			die "cannot create release $LATEST_TAG"
+	else
+		swap_assets "$repo" "$latest_id" "$src_dir" "$names"
+		# Title and notes. make_latest=false on every update as well: the
+		# API's default for it is true.
+		gh_change "update the title and notes of release $LATEST_TAG" -- \
+			gh api -X PATCH "repos/$repo/releases/$latest_id" \
+			-f name="$title" -F body=@"$notes" -f target_commitish="$src_commit" \
+			-F draft=false -F prerelease=false -f make_latest=false ||
+			die "release $LATEST_TAG disappeared while updating it"
+	fi
+	if $dry_run; then
+		log "dry-run: $LATEST_TAG would mirror $src"
+	else
+		log "$LATEST_TAG now mirrors $src"
+	fi
+	check_not_latest "$repo"
+}
+
+# swap_assets REPO ID SRCDIR NAMES: replace the assets of release ID with the
+# files NAMES (one per line) in SRCDIR. Each new file is first uploaded as
+# next-NAME; only then is each old NAME deleted and next-NAME renamed to
+# NAME, checksums.txt last, so a download URL is missing for two quick API
+# calls instead of a whole upload. Assets the source no longer has go.
+swap_assets() {
+	local repo=$1 id=$2 src_dir=$3 names=$4 prefix=next- f old new aid name
+	local stage="$gh_tmp/stage" staged=()
+	release_assets "$repo" "$id"
+
+	# Leftovers of an interrupted swap.
+	while IFS=$'\t' read -r aid name _; do
+		[[ -n $aid && $name == "$prefix"* ]] || continue
+		gh_change "delete leftover asset $name of $LATEST_TAG" -- \
+			gh api -X DELETE "repos/$repo/releases/assets/$aid" || true
+	done <<<"$ASSETS_TSV"
+
+	mkdir -p "$stage"
+	while IFS= read -r f; do
+		$dry_run || cp "$src_dir/$f" "$stage/$prefix$f"
+		staged+=("$stage/$prefix$f")
+	done <<<"$names"
+	gh_change "upload ${#staged[@]} assets to $LATEST_TAG as ${prefix}NAME" -- \
+		gh release upload "$LATEST_TAG" --repo "$repo" "${staged[@]}" ||
+		die "release $LATEST_TAG disappeared while uploading"
+
+	local before=$ASSETS_TSV
+	$dry_run || release_assets "$repo" "$id"
+	local order
+	order="$(grep -vxF checksums.txt <<<"$names" || true)"$'\n'checksums.txt
+	while IFS= read -r f; do
+		[[ -n $f ]] || continue
+		old="$(asset_id "$f")"
+		new="$(asset_id "$prefix$f")"
+		$dry_run || [[ -n $new ]] || die "uploaded asset $prefix$f is missing from $LATEST_TAG"
+		if [[ -n $old ]]; then
+			gh_change "delete old asset $f of $LATEST_TAG" -- \
+				gh api -X DELETE "repos/$repo/releases/assets/$old" || true
+		fi
+		gh_change "rename $prefix$f to $f on $LATEST_TAG" -- \
+			gh api -X PATCH "repos/$repo/releases/assets/${new:-NEW}" -f name="$f" ||
+			die "uploaded asset $prefix$f disappeared"
+	done <<<"$order"
+
+	while IFS=$'\t' read -r aid name _; do
+		[[ -n $aid && $name != "$prefix"* ]] || continue
+		grep -qxF "$name" <<<"$names" && continue
+		gh_change "delete asset $name of $LATEST_TAG (not in the source release)" -- \
+			gh api -X DELETE "repos/$repo/releases/assets/$aid" || true
+	done <<<"$before"
+}
+
+# keep_count -> DATA_KEEP, or DEFAULT_KEEP when unset or empty. It must be a
+# positive integer: 0 would delete every monthly release, including the one
+# data-latest mirrors.
+keep_count() {
+	local keep=${DATA_KEEP:-$DEFAULT_KEEP}
+	[[ $keep =~ ^[1-9][0-9]{0,3}$ ]] || die "DATA_KEEP must be a positive integer, got '$keep'"
+	printf '%s\n' "$keep"
+}
+
+cmd_prune() {
+	local keep repo refs published tag id ref
+	keep="$(keep_count)"
+	repo="$(gh_repo)"
+
+	# List everything before changing anything: an error here changes nothing.
+	list_releases "$repo"
+	gh_get "repos/$repo/git/matching-refs/tags/data-" '.[] | .ref' ||
+		die "cannot list the data-* tags of $repo (HTTP 404)"
+	refs=$GH_OUT
+	published="$(published_monthly)"
+
+	local count=0
+	[[ -z $published ]] || count="$(wc -l <<<"$published" | tr -d ' ')"
+	log "$repo has $count published data-YYYY-MM releases; keeping the newest $keep"
+
+	# The month scripts/size-table.month pins is kept whatever its age: the
+	# README size table check in ci.yml fetches its sources from that release.
+	local pinned="" month_file="$repo_root/scripts/size-table.month"
+	if [[ -s $month_file ]]; then
+		pinned="data-$(tr -d '[:space:]' <"$month_file")"
+		is_monthly_tag "$pinned" || die "$month_file must hold one YYYY-MM, got '${pinned#data-}'"
+	fi
+
+	# Releases beyond the newest $keep, with their tags.
+	local n=0 cutoff="" deleted=0 kept=""
+	while IFS=$'\t' read -r tag id; do
+		[[ -n $tag ]] || continue
+		n=$((n + 1))
+		if ((n <= keep)); then
+			kept+=" $tag"
+			cutoff=$tag
+			continue
+		fi
+		if [[ $tag == "$pinned" ]]; then
+			log "keeping $tag as well: scripts/size-table.month pins it"
+			continue
+		fi
+		assert_monthly_tag "$tag"
+		# The id comes from the listing; check that it is still this tag's
+		# release before deleting it.
+		if gh_get "repos/$repo/releases/$id" '.tag_name'; then
+			[[ $GH_OUT == "$tag" ]] || die "release $id is $GH_OUT, not $tag; refusing to delete it"
+			gh_change "delete release $tag ($id)" -- gh api -X DELETE "repos/$repo/releases/$id" ||
+				log "release $tag ($id) is already gone"
+		else
+			log "release $tag ($id) is already gone"
+		fi
+		delete_monthly_tag "$repo" "$tag"
+		deleted=$((deleted + 1))
+	done <<<"$published"
+	[[ -z $kept ]] || log "keeping:$kept"
+
+	# Monthly tags without a published release (for example left by a run
+	# that deleted the release and then failed) that are older than the
+	# oldest kept release. Only once $keep releases are kept, so no tag is
+	# deleted while there are fewer months than that.
+	if ((n >= keep)) && [[ -n $cutoff ]]; then
+		while IFS= read -r ref; do
+			tag=${ref#refs/tags/}
+			is_monthly_tag "$tag" || continue
+			[[ $tag < $cutoff && $tag != "$pinned" ]] || continue
+			grep -q "^$tag"$'\t' <<<"$published" && continue
+			# A draft (an interrupted publish) may still want its tag.
+			if [[ -n "$(release_ids "$tag" true)" ]]; then
+				log "keeping tag $tag: a draft release uses it"
+				continue
+			fi
+			delete_monthly_tag "$repo" "$tag"
+			deleted=$((deleted + 1))
+		done <<<"$refs"
+	fi
+
+	if ((deleted == 0)); then
+		log "nothing to prune"
+	elif $dry_run; then
+		log "dry-run: would prune $deleted monthly releases/tags"
+	else
+		log "pruned $deleted monthly releases/tags"
+	fi
+}
+
+# delete_monthly_tag REPO TAG: delete refs/tags/TAG, which must be a
+# data-YYYY-MM tag; already gone is fine.
+delete_monthly_tag() {
+	assert_monthly_tag "$2"
+	gh_change "delete tag $2" -- gh api -X DELETE "repos/$1/git/refs/tags/$2" ||
+		log "tag $2 is already gone"
+}
+
+# parse_dry_run ARGS... -> the arguments other than --dry-run in REST.
+# DATA_DRY_RUN=1 also selects a dry run.
+parse_dry_run() {
+	case ${DATA_DRY_RUN:-} in
+	1 | true) dry_run=true ;;
+	"" | 0 | false) ;;
+	*) die "DATA_DRY_RUN must be 1 or 0, got '$DATA_DRY_RUN'" ;;
+	esac
+	REST=()
+	local a
+	for a in "$@"; do
+		if [[ $a == --dry-run ]]; then
+			dry_run=true
+		else
+			REST+=("$a")
+		fi
+	done
+}
+
 main() {
-	[[ $# -ge 2 ]] || usage
-	local cmd=$1 month=$2
-	check_month "$month"
+	[[ $# -ge 1 ]] || usage
+	local cmd=$1
+	shift
 	case $cmd in
 	build | verify | compat | publish)
-		[[ $# -eq 3 ]] || usage
-		"cmd_$cmd" "$month" "$3"
+		[[ $# -eq 2 ]] || usage
+		check_month "$1"
+		"cmd_$cmd" "$1" "$2"
 		;;
 	exists)
-		[[ $# -eq 2 ]] || usage
-		cmd_exists "$month"
+		[[ $# -eq 1 ]] || usage
+		check_month "$1"
+		cmd_exists "$1"
+		;;
+	latest)
+		parse_dry_run "$@"
+		[[ ${#REST[@]} -le 1 ]] || usage
+		if [[ ${#REST[@]} -eq 1 ]]; then
+			check_month "${REST[0]}"
+			cmd_latest "${REST[0]}"
+		else
+			cmd_latest
+		fi
+		;;
+	prune)
+		parse_dry_run "$@"
+		[[ ${#REST[@]} -eq 0 ]] || usage
+		cmd_prune
 		;;
 	*) usage ;;
 	esac

@@ -1,8 +1,10 @@
 name: Data
 
 # Monthly DB-IP Lite sample databases, published as GitHub Release
-# data-YYYY-MM. All logic lives in scripts/data-release.sh so it can be run
-# locally: scripts/data-release.sh build YYYY-MM out/
+# data-YYYY-MM, mirrored to the moving release data-latest, with only the
+# newest monthly releases kept (see docs/DATA.md). All logic lives in
+# scripts/data-release.sh so it can be run locally:
+# scripts/data-release.sh build YYYY-MM out/
 on:
   schedule:
     # 06:00 UTC on the 3rd: DB-IP publishes the month's Lite files on the
@@ -36,7 +38,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
-      contents: write # gh release create (creates the data-YYYY-MM tag)
+      # gh release create (creates the data-YYYY-MM tag), moving the
+      # data-latest tag and its assets, deleting pruned releases and tags.
+      contents: write
     env:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
@@ -121,3 +125,24 @@ jobs:
             cat "$RUNNER_TEMP/data/checksums.txt"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+
+      # The steps below run whenever the job gets this far, also when the
+      # month was already published: both are idempotent, so a rerun
+      # finishes an alias update or a prune that failed half-way.
+      #
+      # Copy the newest data-YYYY-MM release (not necessarily this run's
+      # month, so a backfill of an older month does not move it back) to
+      # the data-latest release and move its tag to that release's commit.
+      # It is never marked as GitHub's Latest release, which stays on v*.
+      - name: Update data-latest
+        run: |
+          scripts/data-release.sh latest
+          echo "Updated [data-latest](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/releases/tag/data-latest)" >> "$GITHUB_STEP_SUMMARY"
+
+      # Retention: delete the data-YYYY-MM releases, and their tags, beyond
+      # the newest DATA_KEEP. The default is DEFAULT_KEEP in
+      # scripts/data-release.sh; a repository variable DATA_KEEP overrides it.
+      - name: Prune old monthly releases
+        env:
+          DATA_KEEP: ${{ vars.DATA_KEEP }}
+        run: scripts/data-release.sh prune

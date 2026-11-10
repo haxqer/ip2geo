@@ -16,6 +16,23 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   another language can prove it reads the format as the Go one does. Its
   README specifies the JSON. `go test` checks the Go reader against it and
   that the files match a fresh `go generate ./internal/conformance`.
+- A `data-latest` release that always serves the newest monthly sample
+  databases at `releases/download/data-latest/<asset>`. After each publish,
+  `data.yml` copies the newest `data-YYYY-MM` release's assets to it, byte
+  for byte, and moves its tag (`scripts/data-release.sh latest`). It is
+  never marked as GitHub's Latest release, which stays on the `v*` code
+  releases.
+- A retention policy for the monthly data releases: `data.yml` keeps the
+  newest 12 `data-YYYY-MM` releases, plus the month that
+  `scripts/size-table.month` pins, and deletes older releases together with
+  their tags (`scripts/data-release.sh prune`). The count is `DEFAULT_KEEP`
+  in the script, or the repository variable `DATA_KEEP`. Only tags that match
+  `data-YYYY-MM` exactly are ever deleted, and both new subcommands support
+  `--dry-run`.
+- `docs/DATA.md`: what the data releases contain, the DB-IP Lite CC BY 4.0
+  attribution duties, checksums, how releases are built and verified,
+  retention, `data-latest`, and how to build `.geoc` files from a MaxMind
+  account in your own private CI. Those files must never be published.
 
 ## [0.3.4] - 2026-11-10
 

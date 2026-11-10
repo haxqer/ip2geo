@@ -59,19 +59,28 @@ dataset and start looking up addresses immediately:
 
 ```sh
 # pick one: country (1.1 MB), region (7.4 MB), or city (24 MB)
-curl -LO https://github.com/haxqer/ip2geo/releases/download/data-2026-11/dbip-city-lite.geoc.gz
+curl -LO https://github.com/haxqer/ip2geo/releases/download/data-latest/dbip-city-lite.geoc.gz
 gunzip dbip-city-lite.geoc.gz
 
 go run github.com/haxqer/ip2geo/cmd/ip2geo@latest lookup -db dbip-city-lite.geoc 8.8.8.8
 # 8.8.8.8: US / California / Mountain View  (37.4220, -122.0850)
 ```
 
+`data-latest` always serves the newest month: it moves to each new monthly
+release, `data-YYYY-MM`. For reproducible builds and tests, pin a month
+instead, for example `releases/download/data-2026-11/dbip-city-lite.geoc.gz`.
+Every release also has a `checksums.txt` (`sha256sum -c`). The newest 12
+months are kept.
+
 These `.geoc` files load with **zero third-party dependencies** via
 `ip2geo.Open`. The monthly releases from `data-2026-11` on are GEO2 files
 (the city file uncompressed: about 86 MB instead of 142 MB) and need ip2geo
-v0.2.0 or later; the older `data-2026-10` files are in the v0.1 format and
+v0.2.0 or later. The older `data-2026-10` files are in the v0.1 format and
 still load. Browse every build on the
 [data releases](https://github.com/haxqer/ip2geo/releases) page.
+[docs/DATA.md](docs/DATA.md) covers what the files contain, how they are
+built and verified, the retention policy, and how to build your own files
+from a MaxMind account in private CI.
 IP geolocation by [DB-IP](https://db-ip.com), licensed under CC BY 4.0.
 
 ## Quick start (drop-in library)
