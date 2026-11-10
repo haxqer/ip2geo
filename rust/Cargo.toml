@@ -1,0 +1,27 @@
+[package]
+name = "ip2geo"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.81"
+description = "Reader for the ip2geo compact IP-geolocation database format (.geoc, GEO2 and GEO1)"
+license = "MIT"
+repository = "https://github.com/haxqer/ip2geo"
+readme = "README.md"
+keywords = ["geoip", "geolocation", "ip", "asn", "mmap"]
+categories = ["network-programming", "parser-implementations"]
+publish = false
+
+[features]
+default = ["mmap"]
+# Memory-map files in Reader::open. Without it, open reads the file into
+# memory; the rest of the API is the same.
+mmap = ["dep:memmap2"]
+
+[dependencies]
+memmap2 = { version = "0.9", optional = true }
+
+[dev-dependencies]
+# The conformance test only: correctly rounded float parsing, so that the
+# expected coordinates can be compared bit for bit.
+serde_json = { version = "1", features = ["float_roundtrip"] }
+

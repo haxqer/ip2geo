@@ -7,6 +7,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- A Rust reader in `rust/` (crate `ip2geo`, not published): reads GEO2,
+  revision 2.1 included, and GEO1, validates its input as the Go reader
+  does, and passes the conformance suite in `testdata/conformance`. Its
+  API follows the Go one (`Reader::open`, `lookup`, `lookup_details`,
+  `asn`, `lookup_range`, `ranges`, `with_language`, `metadata`); CI checks
+  it with rustfmt, clippy and its tests on stable and on its minimum Rust
+  version, 1.81.
 - A language-neutral conformance suite in `testdata/conformance`: small
   synthetic databases (every profile, the ASN profile, extension fields and
   languages, a GEO1 file) and, for each, a JSON document of the answers a

@@ -1,0 +1,4 @@
+# cargo update and cargo generate-lockfile pick dependency versions that
+# support the rust-version in Cargo.toml (Cargo 1.84+; older Cargo ignores it).
+[resolver]
+incompatible-rust-versions = "fallback"

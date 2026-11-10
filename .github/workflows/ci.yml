@@ -116,6 +116,69 @@ jobs:
       - name: go test (root package)
         run: go test ./
 
+  # The Rust reader in rust/: formatting, clippy and its tests (the
+  # conformance suite and the malformed-input tests) on the latest stable
+  # release, and the tests on the minimum version, rust-version in
+  # rust/Cargo.toml. The runner's preinstalled rustup installs both, so no
+  # third-party action is involved. --locked builds the committed
+  # Cargo.lock and fails if it is out of date.
+  rust:
+    name: rust (${{ matrix.toolchain }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        # Keep the first entry equal to rust-version in rust/Cargo.toml.
+        toolchain: ["1.81", stable]
+    defaults:
+      run:
+        working-directory: rust
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Rust ${{ matrix.toolchain }}
+        env:
+          TOOLCHAIN: ${{ matrix.toolchain }}
+        run: |
+          rustup toolchain install "$TOOLCHAIN" --profile minimal \
+            --component rustfmt --component clippy --no-self-update
+          rustup override set "$TOOLCHAIN"
+          rustc --version
+          cargo --version
+
+      - name: MSRV matches Cargo.toml
+        if: matrix.toolchain != 'stable'
+        env:
+          TOOLCHAIN: ${{ matrix.toolchain }}
+        run: |
+          msrv="$(sed -n 's/^rust-version = "\(.*\)"$/\1/p' Cargo.toml)"
+          if [ "$msrv" != "$TOOLCHAIN" ]; then
+            echo "::error file=rust/Cargo.toml::rust-version is '${msrv}', the CI matrix tests '${TOOLCHAIN}'"
+            exit 1
+          fi
+
+      - name: cargo fmt
+        if: matrix.toolchain == 'stable'
+        run: cargo fmt --check
+
+      - name: cargo clippy
+        if: matrix.toolchain == 'stable'
+        run: |
+          cargo clippy --locked --all-targets -- -D warnings
+          cargo clippy --locked --all-targets --no-default-features -- -D warnings
+
+      - name: cargo test
+        run: cargo test --locked
+
+      # Without the mmap feature (no memmap2): Reader::open reads the file.
+      - name: cargo test (no default features)
+        run: cargo test --locked --no-default-features
+
   lint:
     runs-on: ubuntu-latest
     timeout-minutes: 10
