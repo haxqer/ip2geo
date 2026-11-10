@@ -1,5 +1,9 @@
 github.com/davecgh/go-spew v1.1.1 h1:vj9j/u1bqnvCEfJOwUhtlOARqs3+rkHYY13jYWTU97c=
 github.com/davecgh/go-spew v1.1.1/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
+github.com/haxqer/ip2geo v0.4.0 h1:GGMsCUS7jeQJEKWnELtSoWi/peZI0pJhb4xFb8MFMGY=
+github.com/haxqer/ip2geo v0.4.0/go.mod h1:nYr77YIdHvpNCAFASjJq4Z+YIT3qnFiWzY8yzpCG8F0=
+github.com/haxqer/ip2geo/mmdb v0.4.0 h1:eKse/MWEN3BKKK9jUfHdf9tZWu7S6tGhng3nGmj8nOY=
+github.com/haxqer/ip2geo/mmdb v0.4.0/go.mod h1:0yO7uZruF2qPiM75tuRixsnyL0FMJ5NsIJxjklrysEg=
 github.com/oschwald/maxminddb-golang/v2 v2.4.1 h1:OffzqSABE3Sw354GdBThqDsKfpA4GWBqOY2P91V8tjI=
 github.com/oschwald/maxminddb-golang/v2 v2.4.1/go.mod h1:CZK8iQQMKfy6mKOifoyUmrj4vTHnMiGVaS7hDaZZxQ0=
 github.com/pmezard/go-difflib v1.0.0 h1:4DBwDE0NGyQoBHbLQYPwSUPoCMWR5BEzIk/f1lZbAQM=
