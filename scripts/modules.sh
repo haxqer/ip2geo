@@ -89,6 +89,14 @@ cmd_require() {
 	check_version "$v"
 	(cd "$repo_root/mmdb" && go mod edit -require="$ROOT@$v")
 	(cd "$repo_root/cmd/ip2geo" && go mod edit -require="$ROOT@$v" -require="$MMDB@$v")
+	# The untagged modules that require mmdb (scripts/sizetable) now need
+	# the root at $v as well (mmdb requires it), or CI's tidy check fails.
+	# Every module replaces both with the checkout, so tidy fetches nothing.
+	local dir
+	while read -r dir; do
+		case $dir in . | mmdb | cmd/ip2geo) continue ;; esac
+		(cd "$repo_root/$dir" && GOFLAGS=-mod=mod go mod tidy)
+	done < <(modules)
 	cmd_check "$v"
 	log "mmdb and cmd/ip2geo now require $v; commit, then tag $v and mmdb/$v on that commit"
 }
