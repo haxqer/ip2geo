@@ -38,8 +38,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
-      # gh release create (creates the data-YYYY-MM tag), moving the
-      # data-latest tag and its assets, deleting pruned releases and tags.
+      # gh release create (creates the data-YYYY-MM and data-latest tags),
+      # replacing data-latest's assets, deleting pruned releases and tags.
       contents: write
     env:
       GH_TOKEN: ${{ github.token }}
@@ -132,7 +132,7 @@ jobs:
       #
       # Copy the newest data-YYYY-MM release (not necessarily this run's
       # month, so a backfill of an older month does not move it back) to
-      # the data-latest release and move its tag to that release's commit.
+      # the data-latest release, whose tag never moves.
       # It is never marked as GitHub's Latest release, which stays on v*.
       - name: Update data-latest
         run: |

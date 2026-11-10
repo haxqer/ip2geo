@@ -28,13 +28,14 @@
 #
 # latest and prune use gh the same way. latest keeps one release,
 # data-latest, whose assets are byte-for-byte copies of the newest
-# data-YYYY-MM release (or of the month given) and whose tag points at that
-# release's commit, so .../releases/download/data-latest/<asset> always
-# serves the current month. It is never marked as GitHub's "Latest release".
+# data-YYYY-MM release (or of the month given), so
+# .../releases/download/data-latest/<asset> always serves the current month.
+# Its tag is created once, by the Releases API at the commit running the
+# script, and never moves: only the assets, title and notes change. It is never marked as GitHub's "Latest release".
 # prune keeps the newest DATA_KEEP (default: DEFAULT_KEEP below) published
 # data-YYYY-MM releases, plus the month scripts/size-table.month pins, and
 # deletes older ones together with their tags. prune only ever deletes tags
-# matching MONTHLY_TAG_RE, latest only moves data-latest; v* tags are never
+# matching MONTHLY_TAG_RE, latest only touches the data-latest release; v* tags are never
 # touched. Both are idempotent, stop at the first API error, and with
 # --dry-run (or DATA_DRY_RUN=1) make read-only calls only and print what
 # they would change.
@@ -568,9 +569,9 @@ cmd_latest() {
 	latest_id="$(release_ids "$LATEST_TAG" false | head -n 1)"
 	local title="Test databases — DB-IP Lite (latest: ${src#data-})"
 
-	# Already current: same commit, title, asset names and sizes, and
-	# checksums.txt. A rerun of data.yml ends here.
-	if [[ -n $latest_id ]] && tag_commit "$repo" "$LATEST_TAG" && [[ $TAG_COMMIT == "$src_commit" ]] &&
+	# Already current: same title, asset names and sizes, and checksums.txt.
+	# A rerun of data.yml ends here.
+	if [[ -n $latest_id ]] &&
 		gh_get "repos/$repo/releases/$latest_id" '.name' && [[ $GH_OUT == "$title" ]]; then
 		release_assets "$repo" "$latest_id"
 		if [[ "$(cut -f2,3 <<<"$ASSETS_TSV")" == "$(cut -f2,3 <<<"$src_assets")" ]]; then
@@ -600,19 +601,13 @@ cmd_latest() {
 		done <<<"$names"
 	fi
 
-	# Point the data-latest tag at the source's commit: force-update it (it
-	# moves every month) or create it.
-	if tag_commit "$repo" "$LATEST_TAG"; then
-		if [[ $TAG_COMMIT != "$src_commit" ]]; then
-			gh_change "move tag $LATEST_TAG from ${TAG_COMMIT:0:12} to ${src_commit:0:12}" -- \
-				gh api -X PATCH "repos/$repo/git/refs/tags/$LATEST_TAG" -f sha="$src_commit" -F force=true ||
-				die "tag $LATEST_TAG disappeared while moving it"
-		fi
-	else
-		gh_change "create tag $LATEST_TAG at ${src_commit:0:12}" -- \
-			gh api -X POST "repos/$repo/git/refs" -f ref="refs/tags/$LATEST_TAG" -f sha="$src_commit" ||
-			die "cannot create tag $LATEST_TAG"
-	fi
+	# The data-latest tag is never moved. Download URLs only need a release
+	# with that tag, whatever commit it names, and GITHUB_TOKEN may not point
+	# a tag at an older commit whose workflow files differ from the default
+	# branch (HTTP 403 "Resource not accessible by integration"; that is
+	# what moving it to the month's commit hit). The first run creates it,
+	# through the Releases API, at the commit running this script, the way
+	# publish tags a month.
 
 	# Release notes: a pointer to the month, then the month's own notes
 	# (file table, usage, CC BY 4.0 attribution).
@@ -620,7 +615,7 @@ cmd_latest() {
 	gh_get "repos/$repo/releases/$src_id" '.body // ""' || die "release $src disappeared"
 	{
 		# shellcheck disable=SC2016 # the backticks are Markdown
-		printf '> **Moving alias.** `%s` always serves the newest monthly data release, currently **[%s](%s/%s/releases/tag/%s)**: the same files, byte for byte, re-uploaded and re-tagged every month. Download from `%s` (or another `data-YYYY-MM`) when you need a fixed month.\n\n' \
+		printf '> **Moving alias.** `%s` always serves the newest monthly data release, currently **[%s](%s/%s/releases/tag/%s)**: the same files, byte for byte, re-uploaded every month. Download from `%s` (or another `data-YYYY-MM`) when you need a fixed month.\n\n' \
 			"$LATEST_TAG" "$src" "$server" "$repo" "$src" "$src"
 		printf '%s\n' "$GH_OUT"
 	} >"$notes"
@@ -638,10 +633,11 @@ cmd_latest() {
 		# First run: create it. gh uploads into a draft and publishes it once
 		# every asset is up; --latest=false keeps GitHub's Latest badge on
 		# the v* code releases.
-		local files=()
+		local files=() commit
+		commit="${DATA_TARGET_COMMIT:-$(git -C "$repo_root" rev-parse HEAD)}"
 		while IFS= read -r f; do files+=("$src_dir/$f"); done <<<"$names"
-		gh_change "create release $LATEST_TAG with the assets of $src" -- \
-			gh release create "$LATEST_TAG" --repo "$repo" --verify-tag \
+		gh_change "create release $LATEST_TAG (tag at ${commit:0:12}) with the assets of $src" -- \
+			gh release create "$LATEST_TAG" --repo "$repo" --target "$commit" \
 			--title "$title" --notes-file "$notes" --latest=false "${files[@]}" ||
 			die "cannot create release $LATEST_TAG"
 	else
@@ -650,7 +646,7 @@ cmd_latest() {
 		# API's default for it is true.
 		gh_change "update the title and notes of release $LATEST_TAG" -- \
 			gh api -X PATCH "repos/$repo/releases/$latest_id" \
-			-f name="$title" -F body=@"$notes" -f target_commitish="$src_commit" \
+			-f name="$title" -F body=@"$notes" \
 			-F draft=false -F prerelease=false -f make_latest=false ||
 			die "release $LATEST_TAG disappeared while updating it"
 	fi

@@ -163,8 +163,11 @@ https://github.com/haxqer/ip2geo/releases/download/data-latest/<asset>
 ```
 
 serves the current month. Release download URLs resolve through a release
-with that tag name, so a bare moving tag would not be enough. That is why
-`data-latest` is a full release.
+with that tag name, so a bare tag would not be enough. That is why
+`data-latest` is a full release. Its tag is created once and never moves:
+which commit it names does not matter for downloads, and the workflow
+token may not point a tag at an older commit whose workflow files differ
+from `main`.
 
 How it is updated (`scripts/data-release.sh latest [YYYY-MM]`):
 
@@ -173,18 +176,16 @@ How it is updated (`scripts/data-release.sh latest [YYYY-MM]`):
    therefore never moves `data-latest` backwards.
 2. It downloads that release's assets and checks them against its
    `checksums.txt`.
-3. It force-moves the `data-latest` tag to the month's commit through the
-   Git refs API, or creates the tag.
-4. The first time, it creates the release with `gh release create
-   --latest=false`. After that it updates the existing release in place:
+3. The first time, it creates the release, and with it the tag, at the
+   commit running the workflow, with `gh release create --latest=false`. After that it updates the existing release in place:
    every new file is uploaded first as `next-<name>`, then each old asset is
    deleted and its `next-` copy renamed, with `checksums.txt` last. Each URL
    is missing only between two quick API calls, never for a whole upload,
    and the release object, its URL and its download counters stay.
-5. It updates the title and notes, with `make_latest=false` on every update,
+4. It updates the title and notes, with `make_latest=false` on every update,
    then checks that GitHub's **Latest release** is still a `v*` release.
 
-It is a no-op when `data-latest` already matches (same commit, title, asset
+It is a no-op when `data-latest` already matches (same title, asset
 names and sizes, and `checksums.txt`).
 
 Things to know:
@@ -193,10 +194,9 @@ Things to know:
   every month. While it is being updated (a few seconds), a download can mix
   the old and new months, so check files against the `checksums.txt` you
   downloaded with them.
-- **The tag moves.** If you have a clone that already has the old
-  `data-latest` tag, `git fetch --tags` reports `would clobber existing tag`
-  for it. Run `git fetch --tags --force`, or `git tag -d data-latest`. A
-  plain `git pull` is not affected.
+- **The tag does not follow the data.** `git checkout data-latest` gives the
+  commit that first created the alias, not the one that built the current
+  month; the release notes link the month's own release and tag.
 - **It is not GitHub's Latest release.** `/releases/latest` and the
   repository badge stay on the newest `v*` code release. If that ever goes
   wrong, `latest` fails the workflow and prints the fix

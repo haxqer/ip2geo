@@ -6,6 +6,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+- `data.yml` failed to create the `data-latest` release: the workflow token
+  may not point a tag at an older commit whose workflow files differ from
+  `main` (HTTP 403). The `data-latest` tag is now created once, by the
+  Releases API at the commit running the workflow, and never moves; each
+  month only its assets, title and notes are replaced.
+
 ## [0.4.0] - 2026-11-10
 
 ### Added
