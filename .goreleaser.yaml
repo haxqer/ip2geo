@@ -1,6 +1,8 @@
 # yaml-language-server: $schema=https://goreleaser.com/static/schema.json
 # GoReleaser v2 configuration. Runs from .github/workflows/release.yml on v* tags.
-# Local dry run: goreleaser release --snapshot --clean
+# Local dry run: goreleaser release --snapshot --clean (builds the container
+# images into the local Docker daemon, pushes nothing; add --skip=docker
+# without one).
 #
 # The CLI is the module github.com/haxqer/ip2geo/cmd/ip2geo. On the commit
 # tagged vX.Y.Z its go.mod requires the root and mmdb modules at vX.Y.Z and
@@ -53,6 +55,54 @@ archives:
 checksum:
   name_template: checksums.txt
   algorithm: sha256
+
+# Container image of the CLI, ghcr.io/haxqer/ip2geo: one multi-arch manifest
+# (linux/amd64 + linux/arm64) packaging the linux binaries built above; the
+# Dockerfile compiles nothing. dockers_v2 (GoReleaser >= 2.12) is the docker
+# support GoReleaser now documents; `dockers` + `docker_manifests` are
+# deprecated in its favour. It runs in the publish phase with `docker buildx`:
+# a real release pushes the manifest, `release --snapshot` only builds local
+# per-platform images (tags suffixed -amd64 / -arm64) and pushes nothing.
+dockers_v2:
+  - id: ip2geo
+    ids: [ip2geo]
+    dockerfile: Dockerfile
+    images:
+      - ghcr.io/haxqer/ip2geo
+    # vX.Y.Z -> X.Y.Z always; X.Y and latest only for a release that is not
+    # a pre-release (v0.4.0-rc.1 gets 0.4.0-rc.1 alone). latest also needs
+    # DOCKER_LATEST=true, which release.yml sets only when this tag is the
+    # highest non-pre-release v* tag, so a patch release of an older minor
+    # moves its X.Y but not latest. Empty tags are dropped.
+    tags:
+      - "{{ .Version }}"
+      - "{{ if not .Prerelease }}{{ .Major }}.{{ .Minor }}{{ end }}"
+      - '{{ if and (not .Prerelease) (eq (index .Env "DOCKER_LATEST") "true") }}latest{{ end }}'
+    platforms:
+      - linux/amd64
+      - linux/arm64
+    extra_files:
+      - LICENSE
+    labels:
+      org.opencontainers.image.title: ip2geo
+      org.opencontainers.image.description: "ip2geo CLI: build compact .geoc IP-geolocation databases from MaxMind, DB-IP and IP2Location sources and look addresses up in them. No database included."
+      # GHCR links the package to the repository through this label.
+      org.opencontainers.image.source: https://github.com/haxqer/ip2geo
+      org.opencontainers.image.url: https://github.com/haxqer/ip2geo
+      org.opencontainers.image.documentation: https://github.com/haxqer/ip2geo#readme
+      org.opencontainers.image.licenses: MIT
+      org.opencontainers.image.version: "{{ .Version }}"
+      org.opencontainers.image.revision: "{{ .FullCommit }}"
+      # The commit time, not "now", like mod_timestamp above.
+      org.opencontainers.image.created: "{{ .CommitDate }}"
+    # Labels live in each platform's image config; GHCR reads the package
+    # description of a multi-arch image from the index annotations.
+    annotations:
+      "index:org.opencontainers.image.description": "ip2geo CLI: build compact .geoc IP-geolocation databases from MaxMind, DB-IP and IP2Location sources and look addresses up in them. No database included."
+      "index:org.opencontainers.image.source": https://github.com/haxqer/ip2geo
+      "index:org.opencontainers.image.licenses": MIT
+      "index:org.opencontainers.image.version": "{{ .Version }}"
+      "index:org.opencontainers.image.revision": "{{ .FullCommit }}"
 
 # Monthly data releases are tagged data-YYYY-MM on main, and the nested
 # modules mmdb/vX.Y.Z and cmd/ip2geo/vX.Y.Z. Exclude them so the previous-tag

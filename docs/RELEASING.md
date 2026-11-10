@@ -75,6 +75,24 @@ whose `go.mod` has one, so cmd/ip2geo drops its own for the commit tagged
    git push origin main
    ```
 
+The same GoReleaser run pushes the CLI's container image,
+`ghcr.io/haxqer/ip2geo` (linux/amd64 + linux/arm64, from the `Dockerfile`):
+tags `X.Y.Z` and `X.Y`, plus `latest` when `vX.Y.Z` is the highest stable
+`v*` tag. A pre-release tag (`vX.Y.Z-rc.N`) pushes `X.Y.Z-rc.N` only and
+never moves `X.Y` or `latest`. Check it after the release:
+
+```sh
+docker run --rm -v "$PWD/testdata/conformance:/data:ro" ghcr.io/haxqer/ip2geo:X.Y.Z lookup -db city.geoc 1.0.0.0
+# 1.0.0.0: QT / North Testshire / Testville  (12.3456, -65.4321) Testland/Capitalia
+```
+
+**First image push only:** GHCR creates the package as private. In the
+package's settings (github.com/users/haxqer/packages/container/ip2geo/settings)
+change its visibility to public, and check that it is linked to this
+repository (the `org.opencontainers.image.source` label does it) and that
+the repository has Actions access with the Write role, so later releases
+can push.
+
 Never move or delete a pushed tag: the module proxy and checksum database
 keep the first contents they see.
 

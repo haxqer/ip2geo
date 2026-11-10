@@ -4,9 +4,8 @@ on:
   push:
     tags: ["v*"]
 
-# GoReleaser creates the GitHub Release and uploads the archives.
-permissions:
-  contents: write
+# Nothing at the workflow level; the job below asks for what it needs.
+permissions: {}
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -15,7 +14,14 @@ concurrency:
 jobs:
   goreleaser:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
+    # GoReleaser creates the GitHub Release and uploads the archives
+    # (contents), and pushes the CLI image to ghcr.io/haxqer/ip2geo
+    # (packages). Both happen in its publish phase, from the same binaries,
+    # so they cannot be split into jobs with narrower tokens.
+    permissions:
+      contents: write
+      packages: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -61,6 +67,42 @@ jobs:
       - name: go test
         run: scripts/modules.sh run go test ./...
 
+      # The image's latest tag must only ever point at the newest stable
+      # release: not at a pre-release (vX.Y.Z-rc.1; .goreleaser.yaml checks
+      # that too), and not at a patch release of an older minor published
+      # after a newer one. Compare against every stable v* tag (the checkout
+      # has them all, fetch-depth: 0).
+      - name: Decide whether the image moves latest
+        id: latest
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          latest=false
+          if [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            newest="$(git tag --list 'v*' --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -n 1)"
+            if [ "$newest" = "$TAG" ]; then
+              latest=true
+            fi
+          fi
+          echo "latest=${latest}" >> "$GITHUB_OUTPUT"
+          echo "ghcr.io/haxqer/ip2geo:latest moves to ${TAG}: ${latest}"
+
+      # buildx with the docker-container driver: the runner's default docker
+      # driver cannot build and push a multi-platform manifest. No QEMU: the
+      # Dockerfile only copies prebuilt binaries and runs nothing, so no
+      # foreign-architecture code executes during the build.
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        with:
+          cache-binary: false # no cache in a job that holds write tokens
+
+      # Logs in with the job's GITHUB_TOKEN (packages: write above); the
+      # action logs out again in its post step.
+      - uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
       - uses: goreleaser/goreleaser-action@a4f02ab5355a589de60d917a659ce617ed19b3de # v7.3.0
         with:
           distribution: goreleaser
@@ -71,3 +113,4 @@ jobs:
           # Name the tag explicitly: monthly data-YYYY-MM tags can point at the
           # same commit as a v* tag.
           GORELEASER_CURRENT_TAG: ${{ github.ref_name }}
+          DOCKER_LATEST: ${{ steps.latest.outputs.latest }} # read by dockers_v2 tags

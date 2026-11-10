@@ -56,6 +56,22 @@ go get github.com/haxqer/ip2geo/mmdb   # the .mmdb builder, if you build from Ma
 application that only opens `.geoc` files never has `maxminddb` in its
 `go.mod` or its build.
 
+The `ip2geo` command-line tool installs with `go install` (see
+[below](#convert-an-mmdb--geoc)), as a binary from the
+[releases](https://github.com/haxqer/ip2geo/releases) page, or as a container
+image for linux/amd64 and linux/arm64, `ghcr.io/haxqer/ip2geo` (tags `X.Y.Z`,
+`X.Y` and `latest`; pre-releases get `X.Y.Z-rc.N` only). The image contains
+the CLI alone, **no database**: mount a directory holding one, for example a
+[sample file](#try-it-now--sample-data-no-signup):
+
+```sh
+docker run --rm -v "$PWD:/data" ghcr.io/haxqer/ip2geo:latest lookup -db /data/dbip-city-lite.geoc 8.8.8.8
+```
+
+`/data` is the working directory, so `-db dbip-city-lite.geoc` works too. The
+image runs as an unprivileged user (uid 65532); to `build` into a mounted
+directory on Linux, run it as yourself with `--user "$(id -u):$(id -g)"`.
+
 ## Try it now — sample data, no signup
 
 No MaxMind account yet? Grab a ready-made database built from the free,

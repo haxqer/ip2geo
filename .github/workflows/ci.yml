@@ -206,6 +206,75 @@ jobs:
           go build ./...
           go vet ./...
 
+  # The release image (Dockerfile, pushed to ghcr.io/haxqer/ip2geo by
+  # GoReleaser on v* tags) on both of its platforms, each on a native runner:
+  # lay out the context GoReleaser would (Dockerfile, LICENSE,
+  # linux/<arch>/ip2geo) from a go build, build the image into the local
+  # daemon and look up an address of the conformance city file in it.
+  # Nothing is pushed and no registry token is involved.
+  image:
+    name: image smoke test (${{ matrix.platform }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-latest
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: stable
+          cache: true
+          cache-dependency-path: "**/go.sum"
+
+      # The same build settings as .goreleaser.yaml (static, trimmed, stripped).
+      - name: Build the CLI and the image
+        env:
+          PLATFORM: ${{ matrix.platform }}
+        run: |
+          ctx="${RUNNER_TEMP}/image"
+          mkdir -p "${ctx}/${PLATFORM}"
+          CGO_ENABLED=0 GOOS="${PLATFORM%/*}" GOARCH="${PLATFORM#*/}" \
+            go -C cmd/ip2geo build -trimpath -ldflags='-s -w' -o "${ctx}/${PLATFORM}/ip2geo" .
+          cp Dockerfile LICENSE "${ctx}/"
+          docker build --platform "$PLATFORM" -t ip2geo:ci "$ctx"
+          docker image inspect --format 'user={{.Config.User}} entrypoint={{.Config.Entrypoint}} workdir={{.Config.WorkingDir}}' ip2geo:ci
+
+      # The expected line is the 1.0.0.0 record of
+      # testdata/conformance/city.json in the CLI's lookup format; the rest
+      # of the output (the field-set lines) must match the binary run on the
+      # host. The image must also run as the unprivileged user.
+      - name: lookup in the image
+        env:
+          PLATFORM: ${{ matrix.platform }}
+        run: |
+          want='1.0.0.0: QT / North Testshire / Testville  (12.3456, -65.4321) Testland/Capitalia'
+          got="$(docker run --rm -v "${GITHUB_WORKSPACE}/testdata/conformance:/data:ro" ip2geo:ci lookup -db city.geoc 1.0.0.0)"
+          echo "$got"
+          if [ "${got%%$'\n'*}" != "$want" ]; then
+            echo "::error::image lookup printed '${got%%$'\n'*}', want '${want}'"
+            exit 1
+          fi
+          host="$("${RUNNER_TEMP}/image/${PLATFORM}/ip2geo" lookup -db testdata/conformance/city.geoc 1.0.0.0)"
+          if [ "$got" != "$host" ]; then
+            echo "::error::image and host binary disagree"
+            diff <(echo "$host") <(echo "$got") || true
+            exit 1
+          fi
+          user="$(docker image inspect --format '{{.Config.User}}' ip2geo:ci)"
+          if [ "$user" != "65532:65532" ]; then
+            echo "::error::image user is '${user}', want 65532:65532"
+            exit 1
+          fi
+
   # Runs the mmdb and CLI integration tests against DB-IP IP-to-City Lite and
   # IP-to-ASN Lite (CC BY 4.0). The databases are only used as test input:
   # nothing built here is uploaded or published, so the attribution

@@ -33,6 +33,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   attribution duties, checksums, how releases are built and verified,
   retention, `data-latest`, and how to build `.geoc` files from a MaxMind
   account in your own private CI. Those files must never be published.
+- A container image of the CLI, `ghcr.io/haxqer/ip2geo`, for linux/amd64
+  and linux/arm64 in one multi-arch manifest. The release workflow builds it
+  with GoReleaser from the same static binaries as the archives, on `scratch`
+  with nothing else in it (no database: mount one), running as uid 65532,
+  with OCI labels for the version, commit, source and license. A `vX.Y.Z`
+  tag publishes `X.Y.Z` and `X.Y`, and `latest` when it is the newest
+  stable release; a pre-release publishes `X.Y.Z-rc.N` alone. CI builds the
+  image on both platforms and checks a `lookup` against the conformance city
+  file.
 
 ### Changed
 - `github.com/haxqer/ip2geo/mmdb` and `github.com/haxqer/ip2geo/cmd/ip2geo`
