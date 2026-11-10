@@ -297,8 +297,9 @@ func readSource(srcMMDB string, co build.Options) (*build.Builder, error) {
 // (ProfileCity, Apple M3); call it once at startup, or use Build +
 // ip2geo.Open to cache the result.
 //
-// Errors wrap ErrOptions, ErrDatabaseType, ErrLanguage, ErrStringTooLong or
-// ErrTooManyStrings when the options or the source database are unsuitable,
+// Errors wrap ErrOptions, ErrDatabaseType, ErrLanguage, ErrStringTooLong,
+// ErrTooManyStrings or ErrIPv4Alias when the options or the source database
+// are unsuitable,
 // and the underlying error (for example fs.ErrNotExist) when the source
 // cannot be read. A ProfileCity build also fails on a source latitude
 // outside [-90, 90] or longitude outside [-180, 180] (NaN included), and

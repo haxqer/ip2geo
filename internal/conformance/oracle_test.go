@@ -254,7 +254,7 @@ func TestReaderMatchesSources(t *testing.T) {
 		for _, n := range d.nets {
 			src := d.records[n.rec]
 			if _, aliased := toV4(n.first); aliased && !n.first.Is4() && !n.first.Is4In6() {
-				continue // IPv6 data under an alias prefix: never looked up
+				continue // an IPv6 network starting in an alias prefix: its first address is looked up as IPv4
 			}
 			dt, ok := r.LookupDetails(n.first)
 			if !ok {

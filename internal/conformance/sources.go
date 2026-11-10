@@ -247,7 +247,7 @@ func cityDataset() dataset {
 	}
 	d := dataset{
 		file:    "city.geoc",
-		about:   "city profile, revision 2.1 with every field set and languages en, de, zh-CN, latScale 4: coordinates (missing, zero, extreme, rounded), u16/u32 maxima, UTF-8 names, IPv6 starts with non-zero low halves, a crowded IPv6 /16, data stored under 6to4 that lookups never reach",
+		about:   "city profile, revision 2.1 with every field set and languages en, de, zh-CN, latScale 4: coordinates (missing, zero, extreme, rounded), u16/u32 maxima, UTF-8 names, IPv6 starts with non-zero low halves, a crowded IPv6 /16, IPv6 data for 2002::/15 whose 6to4 half lookups answer from the IPv4 table",
 		opts:    o,
 		srcType: "Conformance-City",
 		records: []build.Record{
@@ -292,7 +292,7 @@ func cityDataset() dataset {
 				Country: testland,
 				City:    build.City{Names: names("", "Nurstadt"), GeoNameID: 9100009}, // no English name
 			},
-			10: {Country: build.Country{ISOCode: "XZ", Names: names("Shadowland")}}, // only under 6to4
+			10: {Country: build.Country{ISOCode: "XZ", Names: names("Shadowland")}}, // 2002::/15, half of it shadowed by 6to4
 		},
 		nets: []network{
 			pfx("0.0.0.0/30", 7),
@@ -313,14 +313,18 @@ func cityDataset() dataset {
 			pfx("2001:db8:ff:1:4000::/66", 2),
 			pfx("2001:db8:ff:1:8000::/65", 3),
 			pfx("2001:db8:ff:3::1/128", 4),
-			// 6to4 space: stored, but Lookup answers 2002:abcd::/32 from
-			// the IPv4 table (171.205.0.0/16), and Ranges leaves it out.
-			pfx("2002:abcd::/32", 10),
+			// Starts with all of 6to4 2002::/16, which Lookup answers from
+			// the IPv4 table (2002:abcd::/32 from 171.205.0.0/16), so
+			// LookupRange and Ranges start the range at 2003::. (The
+			// builder refuses IPv6 data wholly inside an alias prefix,
+			// which could never be read.)
+			pfx("2002::/15", 10),
 			pfx("ffff:ffff:ffff:ffff::/64", 8),
 		},
 		aliasOf: []string{"1.0.0.0", "171.205.0.0"},
 		queries: []query{
-			q("2002:abcd::", "6to4 alias of 171.205.0.0, not the IPv6 data stored at 2002:abcd::/32"),
+			q("2002:abcd::", "6to4 alias of 171.205.0.0, not the IPv6 data of 2002::/15"),
+			q("2003:abcd::", "IPv6 data of 2002::/15, outside 6to4; its range starts at 2003::"),
 			q("2002:abcd:ffff::1", "6to4 alias of 171.205.255.255"),
 			q("2001:db8:ff:1:3fff:ffff:ffff:ffff", "last address of the first /66"),
 			q("2001:db8:ff:1:4000::", "first address of the second /66 (same top 64 bits)"),

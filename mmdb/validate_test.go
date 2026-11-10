@@ -86,6 +86,57 @@ func TestNetworkCoveringIPv4(t *testing.T) {
 	}
 }
 
+// TestNetworkInIPv4Alias: a source that stores data of its own under
+// Teredo 2001::/32 or 6to4 2002::/16, instead of aliasing them to its IPv4
+// subtree as MaxMind and DB-IP do, fails with ErrIPv4Alias: the reader
+// answers those addresses from the IPv4 data, so the data would never be
+// read. Nothing is written. A network that contains a block is built.
+func TestNetworkInIPv4Alias(t *testing.T) {
+	t.Parallel()
+	au := map[string]any{"country": map[string]any{"iso_code": "AU"}}
+	jp := map[string]any{"country": map[string]any{"iso_code": "JP"}}
+	for _, tt := range []struct{ net, block string }{
+		{"2001:0:102:300::/56", "2001::/32"},
+		{"2002:abcd::/32", "2002::/16"},
+		{"2002::/16", "2002::/16"},
+	} {
+		fx := mmdbFixture{dbType: "GeoIP2-Country", aliasV4: true, networks: []mmdbNet{
+			{"1.0.0.0/24", au},
+			{tt.net, jp},
+			{"2400::/12", jp},
+		}}
+		src := writeMMDB(t, fx)
+		_, err := mmdb.Open(src, mmdb.Options{})
+		if !errors.Is(err, mmdb.ErrIPv4Alias) || !strings.Contains(err.Error(), tt.net+" is inside "+tt.block) {
+			t.Errorf("%s: err = %v, want ErrIPv4Alias naming the network and %s", tt.net, err, tt.block)
+		}
+		out := filepath.Join(t.TempDir(), "out.geoc")
+		if _, err := mmdb.Build(src, out, mmdb.Options{}); !errors.Is(err, mmdb.ErrIPv4Alias) {
+			t.Errorf("%s: Build err = %v, want ErrIPv4Alias", tt.net, err)
+		}
+		if _, err := os.Stat(out); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("%s: Build wrote %s (stat err %v)", tt.net, out, err)
+		}
+	}
+
+	fx := mmdbFixture{dbType: "GeoIP2-Country", aliasV4: true, networks: []mmdbNet{
+		{"171.205.0.0/16", au},
+		{"2000::/3", jp},
+	}}
+	db, err := mmdb.Open(writeMMDB(t, fx), mmdb.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct{ ip, iso string }{
+		{"2002:abcd::1", "AU"}, {"2001:0:abcd:1::", "AU"}, {"2001:1::1", "JP"}, {"2003::1", "JP"},
+	} {
+		rec, ok := db.Lookup(netip.MustParseAddr(c.ip))
+		if !ok || rec.CountryISO != c.iso {
+			t.Errorf("Lookup(%s) = %q, %v; want %q", c.ip, rec.CountryISO, ok, c.iso)
+		}
+	}
+}
+
 // TestMappedNetworkWithoutAlias: maxminddb yields the networks of
 // ::ffff:0:0/96 when that block holds data of its own instead of aliasing
 // the IPv4 subtree. They are IPv4 networks, as IPv4-mapped rows are in a

@@ -18,7 +18,7 @@ ranges. None of it comes from MaxMind, DB-IP or any other real source.
 |---|---|
 | `country.geoc` | country profile, revision 2.0 (no extension sections, one language). Adjacent networks with the same record merged into one range, adjacent networks with different records, found-but-empty records (a network whose source record has none of the profile's fields), a non-CIDR range, a range that spans a whole /16 with no boundary of its own, a boundary exactly at a /16 base, wide gaps, `0.0.0.0` and `255.255.255.255` covered, NAT64 `64:ff9b::/96` data (not mapped to IPv4), `2000::/3` holding both the Teredo and 6to4 alias prefixes, so that its IPv6 ranges are cut at them. |
 | `region.geoc` | region profile, revision 2.1 with every field set the profile allows (EU, continent, registered/represented country, subdivisions, traits) and languages `en`, `de`. A name missing in `de` falls back to `en`; a name present only in `de`; two records with the same base fields that differ only in traits, or only in a German name. |
-| `city.geoc` | city profile, revision 2.1 with every field set and languages `en`, `de`, `zh-CN`, latScale 4. Coordinates missing, zero but present, at the extremes (±90, ±180) and rounded; u16 and u32 maxima (accuracy radius, metro code, GeoNames ids); UTF-8 and 300-byte strings; IPv6 starts with non-zero low 64 bits (exceptions), several sharing their top 64 bits; a single-address /128; 64 alternating /28s in one IPv4 top-20 window; 83 IPv6 starts in one top-16 slot (the Go reader splits such a slot); IPv6 data stored under `2002::/16` that lookups never reach because 6to4 addresses are answered from the IPv4 table. |
+| `city.geoc` | city profile, revision 2.1 with every field set and languages `en`, `de`, `zh-CN`, latScale 4. Coordinates missing, zero but present, at the extremes (±90, ±180) and rounded; u16 and u32 maxima (accuracy radius, metro code, GeoNames ids); UTF-8 and 300-byte strings; IPv6 starts with non-zero low 64 bits (exceptions), several sharing their top 64 bits; a single-address /128; 64 alternating /28s in one IPv4 top-20 window; 83 IPv6 starts in one top-16 slot (the Go reader splits such a slot); IPv6 data for `2002::/15`, whose first half is 6to4 `2002::/16`: lookups there are answered from the IPv4 table, and the IPv6 range starts at `2003::`. |
 | `city-langs.geoc` | city profile, revision 2.1 with languages `en`, `de` and no field set (XFIELDS present with bits 0), latScale 7: seven-decimal coordinates, the int32 extremes of that scale (±900000000, ±1800000000), and `1e-7` printed in exponent form. |
 | `asn.geoc` | ASN profile: AS number 0 with an empty organization (found, not "not found"), the u32 maximum, an empty organization with a non-zero number, a UTF-8 organization, a network given to the builder as an IPv4-mapped prefix. |
 | `geo1-city.geoc` | a legacy GEO1 file (city profile, latScale 4), which the reader transcodes at open. String 0 is `"Ghost"` but string id 0 always reads as `""`; a string id past the string table reads as `""`; record 0 is non-zero but never decoded (id 0 means "not covered"); a u32 accuracy of 70000 reads as 4464 (its low 16 bits); adjacent starts with the same record are not merged; an explicit gap start at `0.0.0.0`. |
@@ -273,8 +273,11 @@ stay separate ranges.
 covered boundary range (record id not 0, empty records included), the IPv4
 ones (as IPv4 addresses) in ascending order, then the IPv6 ones in
 ascending order. Gaps are left out. An IPv6 range is split around the alias
-prefixes and their parts inside them are left out, so a range wholly inside
-`2002::/16` does not appear at all and `2000::/3` appears as three entries.
+prefixes and their parts inside them are left out: `2000::/3` in
+`country.geoc` appears as three entries, `2002::/15` in `city.geoc` as one
+that starts at `2003::`, and a range wholly inside an alias prefix would not
+appear at all (the ip2geo builder does not write one, but a valid file may
+hold one).
 
 | key | type | meaning |
 |---|---|---|
@@ -290,10 +293,12 @@ These are all specified by FORMAT.md, but easy to get wrong:
   and `::ffff:ffff` of `255.255.255.255`; `2001::` and `2002::` are aliases
   of `0.0.0.0`. Teredo maps bits 32-63 (the server), not the obfuscated
   client address.
-- Data stored in the IPv6 table under an alias prefix (here
-  `2002:abcd::/32` in `city.geoc`) is never returned by a lookup, by
-  `LookupRange` or by the range iteration: `2002:abcd::` answers as
-  `171.205.0.0`.
+- IPv6 data for addresses in an alias prefix is never returned by a
+  lookup, by `LookupRange` or by the range iteration: in `city.geoc`,
+  `2002:abcd::` answers as `171.205.0.0`, not with the IPv6 data of
+  `2002::/15`, which answers from `2003::` on. The ip2geo builder refuses
+  IPv6 data that lies wholly inside an alias prefix, so none of these
+  files has any; a reader must still ignore it in a file that does.
 - A found address can have a record with every field empty, and an ASN
   record can have number 0.
 - Two GEO2 records may have identical RECORDS entries (they differ in

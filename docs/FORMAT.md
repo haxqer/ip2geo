@@ -184,6 +184,15 @@ to the embedded IPv4 address before searching, which is what MaxMind
 databases do through their alias pointers. `64:ff9b::/96` (NAT64) is not
 mapped. The zero address is never found.
 
+IPv6 boundaries inside `::/96`, `2001::/32` or `2002::/16` are therefore
+never read: a file holding them is valid, but no lookup returns their data.
+A builder should not write data for an IPv6 range that lies wholly inside
+one of these prefixes; the ip2geo builder refuses such a source network or
+range with an error rather than store it, and stores the networks of
+`::ffff:0:0/96` as IPv4 networks. An IPv6 range that only overlaps one of
+the prefixes, such as `2000::/3`, is stored, and its addresses outside the
+prefix are read.
+
 ## Reader requirements
 
 A conforming reader rejects a file, without reading past its end and without

@@ -300,6 +300,14 @@ func (b *Builder) Record(r *Record) (uint32, error) {
 // an IPv6 MaxMind DB (::/96) and more, but ip2geo.Reader looks IPv4
 // addresses up in the IPv4 index only, so no IPv4 lookup would find the
 // data.
+//
+// An IPv6 prefix inside ::/96, 2001::/32 or 2002::/16 fails with
+// ErrIPv4Alias: ip2geo.Reader looks those addresses up as the IPv4 address
+// they embed, so the data would never be read. maxminddb yields none for
+// MaxMind and DB-IP files, which alias 2001::/32 and 2002::/16 to the IPv4
+// subtree as well, and it yields the networks of ::/96 (that subtree) as
+// IPv4 networks. A prefix that contains one of the blocks, such as
+// 2000::/3, is stored: its other addresses are read.
 func (b *Builder) AddPrefix(pfx netip.Prefix, id uint32) error {
 	addr, bits := pfx.Addr(), pfx.Bits()
 	if addr.Is4In6() {
@@ -318,6 +326,9 @@ func (b *Builder) AddPrefix(pfx netip.Prefix, id uint32) error {
 			"a source must keep its IPv4 data in the ::/96 subtree", pfx)
 	}
 	s16 := addr.As16()
+	if ab := ipv4AliasBits(&s16); ab != 0 && bits >= ab {
+		return aliasError("network "+pfx.String(), addr, ab)
+	}
 	b.v6.add(range6{start: s16, last: lastV6(s16, bits), rec: id})
 	b.networks++
 	return nil
@@ -325,7 +336,10 @@ func (b *Builder) AddPrefix(pfx netip.Prefix, id uint32) error {
 
 // AddRange adds the addresses first to last, inclusive, whose data is
 // record id. Both must be of the same family (an IPv4-mapped IPv6 address
-// counts as IPv4) and first must not be above last.
+// counts as IPv4) and first must not be above last. An IPv6 range that lies
+// wholly inside ::/96, 2001::/32 or 2002::/16 fails with ErrIPv4Alias, as
+// in AddPrefix; a range that only overlaps one of them is stored, and
+// ip2geo.Reader reads its addresses outside the block.
 func (b *Builder) AddRange(first, last netip.Addr, id uint32) error {
 	first, last = first.Unmap(), last.Unmap()
 	switch {
@@ -333,6 +347,12 @@ func (b *Builder) AddRange(first, last netip.Addr, id uint32) error {
 		return fmt.Errorf("range %s-%s: addresses of different families", first, last)
 	case last.Less(first):
 		return fmt.Errorf("range %s-%s: first address above the last", first, last)
+	}
+	if first.Is6() {
+		f16 := first.As16()
+		if ab := ipv4AliasBits(&f16); ab != 0 && netip.PrefixFrom(first, ab).Masked().Contains(last) {
+			return aliasError("range "+first.String()+"-"+last.String(), first, ab)
+		}
 	}
 	b.networks++
 	if first.Is4() {
@@ -342,6 +362,33 @@ func (b *Builder) AddRange(first, last netip.Addr, id uint32) error {
 		b.v6.add(range6{start: first.As16(), last: last.As16(), rec: id})
 	}
 	return nil
+}
+
+// ipv4AliasBits returns the length of the alias prefix that holds the IPv6
+// address a: one of the blocks that ip2geo.Reader looks up as the IPv4
+// address they embed (docs/FORMAT.md), as the reader's embeddedV4 tells
+// them apart. It is 96 for ::/96 (IPv4-compatible), 32 for 2001::/32
+// (Teredo) and 16 for 2002::/16 (6to4), and 0 for any other address.
+// ::ffff:0:0/96 is not among them: an IPv4-mapped address is not IPv6 here.
+func ipv4AliasBits(a *[16]byte) int {
+	hi := binary.BigEndian.Uint64(a[:8])
+	switch {
+	case hi>>48 == 0x2002:
+		return 16
+	case hi>>32 == 0x2001_0000:
+		return 32
+	case hi == 0 && binary.BigEndian.Uint32(a[8:12]) == 0:
+		return 96
+	}
+	return 0
+}
+
+// aliasError is the ErrIPv4Alias error for what (a network or a range, as
+// the message names it), which lies inside the alias prefix of length bits
+// that holds addr.
+func aliasError(what string, addr netip.Addr, bits int) error {
+	return fmt.Errorf("%s is inside %s, whose addresses are looked up as the IPv4 address they embed, "+
+		"so its data could never be read: %w", what, netip.PrefixFrom(addr, bits).Masked(), ErrIPv4Alias)
 }
 
 // buildResult is what encode writes. The string ids in recs and meta are

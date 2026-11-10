@@ -242,11 +242,9 @@ func TestAddPrefix(t *testing.T) {
 	if b.networks != 0 {
 		t.Errorf("rejected networks were counted: %d", b.networks)
 	}
-	// ::/96 itself is IPv4-compatible space, not the IPv4 subtree as
-	// maxminddb yields it (that comes as IPv4 prefixes), and an IPv6
-	// prefix that does not contain :: is fine; an IPv4-mapped prefix is
-	// IPv4.
-	for _, p := range []string{"::/96", "::1:0:0:0/80", "8000::/1", "::ffff:1.0.0.0/120", "2.0.0.0/8"} {
+	// An IPv6 prefix that does not contain :: is fine (::/96 itself fails
+	// with ErrIPv4Alias, see TestIPv4Alias); an IPv4-mapped prefix is IPv4.
+	for _, p := range []string{"::1:0:0:0/80", "8000::/1", "::ffff:1.0.0.0/120", "2.0.0.0/8"} {
 		if err := b.AddPrefix(netip.MustParsePrefix(p), id); err != nil {
 			t.Errorf("AddPrefix(%s) = %v", p, err)
 		}
@@ -270,7 +268,137 @@ func TestAddPrefix(t *testing.T) {
 			t.Errorf("Lookup(%s) ok = %v, want %v", c.ip, ok, c.found)
 		}
 	}
-	if st.Networks != 5 {
-		t.Errorf("Networks = %d, want 5", st.Networks)
+	if st.Networks != 4 {
+		t.Errorf("Networks = %d, want 4", st.Networks)
+	}
+}
+
+// TestIPv4Alias: the reader looks the addresses of ::/96, 2001::/32 and
+// 2002::/16 up as the IPv4 address they embed, so IPv6 data wholly inside
+// one of them could never be read. AddPrefix and AddRange refuse it with
+// ErrIPv4Alias instead of storing it; IPv6 data that only overlaps a block
+// is stored, and IPv4-mapped networks and ranges are IPv4 ones.
+func TestIPv4Alias(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		first, last string // a range; last "" for a prefix in first
+		alias       string // the block named in the error; "" if accepted
+	}{
+		// Prefixes inside a block, down to single addresses.
+		{"::/96", "", "::/96"},
+		{"::102:300/120", "", "::/96"}, // ::1.2.3.0/120
+		{"::1/128", "", "::/96"},
+		{"::ffff:ffff/128", "", "::/96"},
+		{"2001::/32", "", "2001::/32"},
+		{"2001:0:102:300::/56", "", "2001::/32"},
+		{"2001:0:ffff:ffff:ffff:ffff:ffff:ffff/128", "", "2001::/32"},
+		{"2002::/16", "", "2002::/16"},
+		{"2002:abcd::/32", "", "2002::/16"},
+		{"2002:ffff:ffff:ffff:ffff:ffff:ffff:ffff/128", "", "2002::/16"},
+		// Ranges inside a block.
+		{"::1", "::ffff:ffff", "::/96"},
+		{"2001::", "2001:0:ffff:ffff:ffff:ffff:ffff:ffff", "2001::/32"},
+		{"2002:abce::", "2002:abcf::", "2002::/16"},
+		// Prefixes that contain a block or lie next to one.
+		{"2000::/3", "", ""},
+		{"2001::/16", "", ""},
+		{"2001::/31", "", ""},
+		{"2000::/15", "", ""},
+		{"::1:0:0/96", "", ""},
+		{"2001:1::/32", "", ""},
+		{"2003::/16", "", ""},
+		{"64:ff9b::/96", "", ""}, // NAT64 is not mapped
+		// Ranges that overlap a block without lying inside it.
+		{"2000:ffff::", "2001::1", ""},
+		{"2001:0:ffff::", "2001:1::", ""},
+		{"2001:ffff::", "2002:1::", ""},
+		{"2002:ffff::", "2003::", ""},
+		{"::ffff", "::1:0:0", ""},
+		// IPv4-mapped: IPv4 networks and ranges.
+		{"::ffff:5.0.0.0/120", "", ""},
+		{"::ffff:6.0.0.0", "::ffff:6.0.0.255", ""},
+	}
+	b := newTestBuilder(t, ip2geo.ProfileCountry)
+	id, err := b.Record(&Record{Country: Country{ISOCode: "AU"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	accepted := 0
+	for _, tt := range tests {
+		name := tt.first
+		if tt.last == "" {
+			err = b.AddPrefix(netip.MustParsePrefix(tt.first), id)
+		} else {
+			name += "-" + tt.last
+			err = b.AddRange(netip.MustParseAddr(tt.first), netip.MustParseAddr(tt.last), id)
+		}
+		switch {
+		case tt.alias == "":
+			if err != nil {
+				t.Errorf("%s: %v", name, err)
+			}
+			accepted++
+		case !errors.Is(err, ErrIPv4Alias):
+			t.Errorf("%s: err = %v, want ErrIPv4Alias", name, err)
+		case !strings.Contains(err.Error(), name+" is inside "+tt.alias+","):
+			t.Errorf("%s: err = %q, want it to name the network and %s", name, err, tt.alias)
+		}
+	}
+	// The accepted networks overlap one another, so the build is not
+	// finished: TestIPv4AliasLookups checks what the reader answers.
+	if b.networks != accepted {
+		t.Errorf("networks = %d, want %d: a refused network was counted", b.networks, accepted)
+	}
+}
+
+// TestIPv4AliasLookups: what the reader answers around the blocks once the
+// builder has refused the data inside them, and accepted data that
+// contains a block.
+func TestIPv4AliasLookups(t *testing.T) {
+	t.Parallel()
+	b := newTestBuilder(t, ip2geo.ProfileCountry)
+	au, err := b.Record(&Record{Country: Country{ISOCode: "AU"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	jp, err := b.Record(&Record{Country: Country{ISOCode: "JP"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct {
+		p  string
+		id uint32
+	}{{"171.205.0.0/16", au}, {"2000::/3", jp}} {
+		if err := b.AddPrefix(netip.MustParsePrefix(c.p), c.id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := b.AddPrefix(netip.MustParsePrefix("2002:abcd::/32"), jp); !errors.Is(err, ErrIPv4Alias) {
+		t.Fatalf("AddPrefix(2002:abcd::/32) = %v, want ErrIPv4Alias", err)
+	}
+	buf, st, err := b.Finish()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Networks != 2 {
+		t.Errorf("Networks = %d, want 2", st.Networks)
+	}
+	r, err := ip2geo.OpenBytes(buf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct{ ip, iso string }{
+		{"2002:abcd::", "AU"}, // 6to4 alias of 171.205.0.0
+		{"2002:abce::", ""},   // 171.206.0.0: no IPv4 data
+		{"2001:0:abcd:1::", "AU"},
+		{"::171.205.0.1", "AU"},
+		{"2000::1", "JP"},
+		{"2001:1::1", "JP"},
+		{"2003::1", "JP"},
+	} {
+		rec, ok := r.Lookup(netip.MustParseAddr(c.ip))
+		if ok != (c.iso != "") || rec.CountryISO != c.iso {
+			t.Errorf("Lookup(%s) = %q, %v; want %q", c.ip, rec.CountryISO, ok, c.iso)
+		}
 	}
 }

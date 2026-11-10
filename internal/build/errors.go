@@ -12,6 +12,7 @@ import (
 // returned.
 var (
 	ErrDatabaseType = errors.New("unsupported database type")
+	ErrIPv4Alias    = errors.New("IPv6 network inside an IPv4 alias prefix")
 	// ErrLanguage is ip2geo.ErrLanguage itself, not a copy with the same
 	// text, so a builder error also matches errors.Is(err,
 	// ip2geo.ErrLanguage).

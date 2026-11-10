@@ -13,6 +13,14 @@ var (
 	// or ProfileASN with a database that is not an ASN one.
 	ErrDatabaseType = build.ErrDatabaseType
 
+	// ErrIPv4Alias reports a source network inside 2001::/32 (Teredo) or
+	// 2002::/16 (6to4), whose addresses ip2geo.Reader looks up as the IPv4
+	// address they embed, so the network's data could never be read. A
+	// MaxMind or DB-IP database has none: it aliases both blocks to its
+	// IPv4 data, and those aliases are not read as networks. No output is
+	// written.
+	ErrIPv4Alias = build.ErrIPv4Alias
+
 	// ErrLanguage reports that Options.Lang, or a language of
 	// Options.Languages, is not one of the languages the source database
 	// lists in its metadata, so every name in it would be empty. The error

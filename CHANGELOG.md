@@ -70,6 +70,19 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `ExampleReader_fromMMDB` is now `mmdb.ExampleOpen`, and `TestDBIPParity`
   moved from `csvdb` to the `mmdb` module, which has the `.mmdb` reader.
 
+### Fixed
+- The builder no longer stores IPv6 data that no lookup can read. A source
+  network inside `::/96`, Teredo `2001::/32` or 6to4 `2002::/16`, whose
+  addresses the reader looks up as the IPv4 address they embed, was written
+  to the IPv6 index and never returned by `Lookup`, `LookupRange` or
+  `Ranges`; an mmdb build of such a source now fails with the new
+  `mmdb.ErrIPv4Alias`. MaxMind and DB-IP databases have none (they alias
+  these blocks to their IPv4 data), so their builds are byte-identical to
+  before; CSV builds already left these blocks out. IPv4-mapped
+  `::ffff:0:0/96` networks are still built as IPv4 networks. The
+  conformance `city.geoc` now covers `2002::/15` instead of storing data
+  under `2002:abcd::/32`, and docs/FORMAT.md states the rule.
+
 ## [0.3.4] - 2026-11-10
 
 ### Changed
