@@ -1,4 +1,4 @@
-package csvdb_test
+package mmdb_test
 
 import (
 	"compress/gzip"

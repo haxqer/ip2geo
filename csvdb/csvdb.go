@@ -61,8 +61,8 @@
 // round the other way, because the .mmdb stores some of them as a float64
 // one unit in the last place away from the nearest float64 of the CSV's
 // decimal (about 1.7M IPv4 addresses of the city database at scale 4).
-// The test TestDBIPParity measures this when IP2GEO_TEST_DBIP_DIR names a
-// directory with both files.
+// TestDBIPParity in the mmdb module measures this when IP2GEO_TEST_DBIP_DIR
+// names a directory with both files.
 //
 // Invalid options and unsuitable sources are reported with the sentinel
 // errors ErrOptions, ErrDatabaseType and ErrSyntax; test for them with

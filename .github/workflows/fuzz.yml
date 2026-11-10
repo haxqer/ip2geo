@@ -31,6 +31,7 @@ jobs:
         with:
           go-version: stable
           cache: true
+          cache-dependency-path: "**/go.sum"
 
       # Carry the generated corpus ($GOCACHE/fuzz) from one weekly run to the
       # next so each run starts where the last one stopped. A unique key per

@@ -2,7 +2,7 @@ name: Bench
 
 # Compares Reader.Lookup speed with the previous v* release on DB-IP
 # IP-to-City Lite (CC BY 4.0, used only as test input; nothing built here is
-# published). Both trees run the same BenchmarkLookup in ./mmdb, which builds
+# published). Both trees run the same BenchmarkLookup in mmdb/, which builds
 # its readers in memory from the source with that tree's builder, so the
 # comparison covers the file format as well as the search code.
 #
@@ -68,6 +68,7 @@ jobs:
         with:
           go-version: stable
           cache: true
+          cache-dependency-path: "**/go.sum"
 
       # The DB-IP steps are the integration job's in ci.yml, with the same
       # cache key, so the two workflows share one download per month.
@@ -150,8 +151,12 @@ jobs:
           IP2GEO_TEST_MMDB: ${{ runner.temp }}/dbip-city-lite.mmdb
         run: |
           test -s "$IP2GEO_TEST_MMDB"
-          (cd "${RUNNER_TEMP}/base" && go test -c -o "${RUNNER_TEMP}/base.test" ./mmdb/)
-          go test -c -o "${RUNNER_TEMP}/head.test" ./mmdb/
+          # Compile from inside mmdb/, which works for both layouts: mmdb is
+          # now a module of its own (built against its tree's root through a
+          # replace directive), and in releases before the split the root
+          # module's go.mod covers it.
+          (cd "${RUNNER_TEMP}/base/mmdb" && go test -c -o "${RUNNER_TEMP}/base.test" .)
+          (cd "${GITHUB_WORKSPACE}/mmdb" && go test -c -o "${RUNNER_TEMP}/head.test" .)
           # Run from each package directory, as go test would.
           bench() {
             local side=$1 dir=$2

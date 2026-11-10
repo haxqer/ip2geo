@@ -1,17 +1,24 @@
 # yaml-language-server: $schema=https://goreleaser.com/static/schema.json
 # GoReleaser v2 configuration. Runs from .github/workflows/release.yml on v* tags.
 # Local dry run: goreleaser release --snapshot --clean
+#
+# The CLI is the module github.com/haxqer/ip2geo/cmd/ip2geo. On the commit
+# tagged vX.Y.Z its go.mod requires the root and mmdb modules at vX.Y.Z and
+# replaces both with this tree (docs/RELEASING.md; the release workflow runs
+# scripts/modules.sh check), so the binaries are built from the tagged
+# sources, not from whatever versions are published.
 version: 2
 
 project_name: ip2geo
 
 before:
   hooks:
-    - go mod download
+    - go -C cmd/ip2geo mod download
 
 builds:
   - id: ip2geo
-    main: ./cmd/ip2geo
+    dir: cmd/ip2geo # the module's directory; go build runs there
+    main: .
     binary: ip2geo
     env:
       - CGO_ENABLED=0 # static binaries, no libc dependency
@@ -19,6 +26,10 @@ builds:
       - -trimpath # no local paths in the binary; reproducible builds
     ldflags:
       - -s -w # strip symbol table and DWARF
+      # A module replaced by a directory has no version in the build
+      # information, so name the release for the builder string that built
+      # files record ("ip2geo/vX.Y.Z", see internal/build.BuilderName).
+      - -X github.com/haxqer/ip2geo/internal/build.version=v{{ .Version }}
     # Stamp files with the commit time instead of "now" so rebuilding the
     # same tag gives byte-identical binaries.
     mod_timestamp: "{{ .CommitTimestamp }}"
@@ -43,12 +54,15 @@ checksum:
   name_template: checksums.txt
   algorithm: sha256
 
-# Monthly data releases are tagged data-YYYY-MM on main. Exclude them so the
-# previous-tag lookup (git describe --exclude, which takes globs) only sees v*
-# tags and the changelog spans release to release.
+# Monthly data releases are tagged data-YYYY-MM on main, and the nested
+# modules mmdb/vX.Y.Z and cmd/ip2geo/vX.Y.Z. Exclude them so the previous-tag
+# lookup (git describe --exclude, which takes globs) only sees v* tags and
+# the changelog spans release to release.
 git:
   ignore_tags:
     - "data-*"
+    - "mmdb/*"
+    - "cmd/*"
 
 changelog:
   use: git # newest first, as git log lists them

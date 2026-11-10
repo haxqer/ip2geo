@@ -99,7 +99,8 @@ generate() {
 	country="$(source_file "$dir" country "$month" "$work")"
 	asn="$(source_file "$dir" asn "$month" "$work")"
 	log "building every row from DB-IP Lite $month"
-	(cd "$repo_root" && go run ./scripts/sizetable -month "$month" \
+	# scripts/sizetable is a module of its own (it needs the mmdb module).
+	(cd "$repo_root/scripts/sizetable" && go run . -month "$month" \
 		-city "$city" -country "$country" -asn "$asn" -readme "$readme" -out "$out")
 }
 

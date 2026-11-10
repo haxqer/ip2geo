@@ -45,8 +45,21 @@ jobs:
             exit 1
           fi
 
+      # mmdb/vX.Y.Z must be on this commit and the nested modules must
+      # require vX.Y.Z, with cmd/ip2geo still building against this tree:
+      # GoReleaser builds the binaries from it (docs/RELEASING.md, step 1).
+      - name: Check the nested modules
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          scripts/modules.sh check "$TAG"
+          if [ "$(git rev-parse -q --verify "refs/tags/mmdb/${TAG}^{commit}")" != "$(git rev-parse HEAD)" ]; then
+            echo "::error::tag mmdb/${TAG} is missing or not on this commit; push it with ${TAG} (docs/RELEASING.md)"
+            exit 1
+          fi
+
       - name: go test
-        run: go test ./...
+        run: scripts/modules.sh run go test ./...
 
       - uses: goreleaser/goreleaser-action@a4f02ab5355a589de60d917a659ce617ed19b3de # v7.3.0
         with:

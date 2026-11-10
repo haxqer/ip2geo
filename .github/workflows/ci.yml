@@ -40,7 +40,8 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: ${{ matrix.go }}
-          cache: true # module + build cache, keyed on go.sum
+          cache: true # module + build cache, keyed on every module's go.sum
+          cache-dependency-path: "**/go.sum"
 
       - name: gofmt
         run: |
@@ -51,16 +52,35 @@ jobs:
             exit 1
           fi
 
-      - name: go vet
-        run: go vet ./...
+      # Every module: the root (reader, csvdb, builder core), mmdb,
+      # cmd/ip2geo, scripts/sizetable and bench. The nested ones build
+      # against this checkout through replace directives (docs/RELEASING.md).
+      - name: go mod tidy
+        run: scripts/modules.sh run go mod tidy -diff
 
+      # The root module is what `go get github.com/haxqer/ip2geo` adds to a
+      # user's build: it must not require maxminddb (or anything else that
+      # pulls it in). mmdb and cmd/ip2geo are modules of their own for this.
+      - name: root module does not require maxminddb
+        run: |
+          graph="$(go mod graph)"
+          echo "$graph"
+          if grep -q maxminddb <<<"$graph"; then
+            echo "::error file=go.mod::the root module's graph includes maxminddb"
+            exit 1
+          fi
+
+      - name: go vet
+        run: scripts/modules.sh run go vet ./...
+
+      # bench/ included: it has no tests, so this is what keeps it building.
       - name: go build
-        run: go build ./...
+        run: scripts/modules.sh run go build ./...
 
       # The mmdb integration tests skip here (IP2GEO_TEST_MMDB unset); they run
       # in the integration job below without -race.
       - name: go test -race
-        run: go test -race ./...
+        run: scripts/modules.sh run go test -race ./...
 
       # 32-bit build of the hermetic reader tests: catches size arithmetic that
       # overflows int on 386. -race is not supported on 386.
@@ -91,6 +111,7 @@ jobs:
         with:
           go-version: stable
           cache: true
+          cache-dependency-path: "**/go.sum"
 
       - name: go test (root package)
         run: go test ./
@@ -107,18 +128,33 @@ jobs:
         with:
           go-version: stable
 
-      # Configuration lives in .golangci.yml (v2 format). The action verifies
-      # the config against the schema before running. goinstall builds the
-      # linter through the Go module proxy: the release binary comes from
-      # github.com/.../releases/download, which has failed CI with 504s.
+      # Configuration lives in .golangci.yml (v2 format); golangci-lint finds
+      # it from every module's directory. goinstall builds the linter through
+      # the Go module proxy: the release binary comes from
+      # github.com/.../releases/download, which has failed CI with 504s. The
+      # action only installs it: one golangci-lint run covers one module, so
+      # the run step goes through every module.
       - uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
         with:
           version: v2.15.0
           install-mode: goinstall
+          install-only: true
+
+      - name: golangci-lint config verify
+        run: golangci-lint config verify
+
+      - name: golangci-lint run
+        run: scripts/modules.sh run golangci-lint run ./...
 
   vuln:
+    name: vuln (${{ matrix.module }})
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        # Every module; scripts/modules.sh list prints the same set.
+        module: [".", mmdb, cmd/ip2geo, scripts/sizetable, bench]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -131,7 +167,44 @@ jobs:
         with:
           repo-checkout: false # already checked out above, without persisted credentials
           go-version-input: stable
+          cache-dependency-path: "**/go.sum"
+          work-dir: ${{ matrix.module }}
           go-package: ./...
+
+  # mmdb vX.Y.Z requires the root module vX.Y.Z or newer and imports its
+  # internal/build package, which has no compatibility promise of its own; a
+  # user can upgrade github.com/haxqer/ip2geo and keep an older mmdb. So the
+  # newest released mmdb must still build, tests included, against this
+  # root. Skipped until the first mmdb/v* tag exists.
+  mmdb-compat:
+    name: released mmdb builds against this root
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0 # tags
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: stable
+          cache: true
+          cache-dependency-path: "**/go.sum"
+
+      - name: Build the newest mmdb/v* against this checkout's root module
+        run: |
+          tag="$(git tag --list 'mmdb/v*' --sort=-v:refname | head -n 1)"
+          if [ -z "$tag" ]; then
+            echo "::notice::no mmdb/v* tag yet; skipping"
+            exit 0
+          fi
+          echo "Building ${tag} against this root"
+          git worktree add --detach "${RUNNER_TEMP}/released" "$tag"
+          cd "${RUNNER_TEMP}/released/mmdb"
+          go mod edit -replace "github.com/haxqer/ip2geo=${GITHUB_WORKSPACE}"
+          go build ./...
+          go vet ./...
 
   # Runs the mmdb and CLI integration tests against DB-IP IP-to-City Lite and
   # IP-to-ASN Lite (CC BY 4.0). The databases are only used as test input:
@@ -151,6 +224,7 @@ jobs:
         with:
           go-version: stable
           cache: true
+          cache-dependency-path: "**/go.sum"
 
       # DB-IP publishes the new month early in the month; until then the
       # current month's files are a 404, so fall back to the previous month.
@@ -250,6 +324,7 @@ jobs:
       # TestExtMatchesSource checks every field set in three languages and
       # TestASNMatchesSource the ASN profile, both against maxminddb.
       - name: Integration tests
+        working-directory: mmdb
         env:
           IP2GEO_TEST_MMDB: ${{ runner.temp }}/dbip-city-lite.mmdb
           IP2GEO_TEST_ASN_MMDB: ${{ runner.temp }}/dbip-asn-lite.mmdb
@@ -257,23 +332,25 @@ jobs:
           test -s "$IP2GEO_TEST_MMDB"
           test -s "$IP2GEO_TEST_ASN_MMDB"
           go test -v -count=1 -timeout 30m \
-            -run 'TestBuildMatchesSource|TestOpenInMemory|TestRegisteredCountryOnly|TestExtMatchesSource|TestASNMatchesSource' ./mmdb/
+            -run 'TestBuildMatchesSource|TestOpenInMemory|TestRegisteredCountryOnly|TestExtMatchesSource|TestASNMatchesSource' .
 
       # build, info and lookup through the CLI on both sources: -fields all
       # with two languages on City, -profile asn on ASN. No -race, as above.
       - name: CLI integration test
+        working-directory: cmd/ip2geo
         env:
           IP2GEO_TEST_MMDB: ${{ runner.temp }}/dbip-city-lite.mmdb
           IP2GEO_TEST_ASN_MMDB: ${{ runner.temp }}/dbip-asn-lite.mmdb
-        run: go test -v -count=1 -timeout 15m -run 'TestBuildCommand' ./cmd/ip2geo/
+        run: go test -v -count=1 -timeout 15m -run 'TestBuildCommand' .
 
       # Lookup ns/op and allocs/op per profile for IPv4 and IPv6 on the same
       # database. No -race. Shared runners are noisy, so the numbers are for
       # reading, not a gate; only a failure to build or run fails the step.
       - name: Lookup benchmark
+        working-directory: mmdb
         env:
           IP2GEO_TEST_MMDB: ${{ runner.temp }}/dbip-city-lite.mmdb
-        run: go test -run '^$' -bench BenchmarkLookup -benchtime=2s ./mmdb/
+        run: go test -run '^$' -bench BenchmarkLookup -benchtime=2s .
 
   # Rebuilds the README's size table (between <!-- size-table:begin --> and
   # <!-- size-table:end -->) from the DB-IP Lite month pinned in
@@ -297,6 +374,7 @@ jobs:
         with:
           go-version: stable
           cache: true
+          cache-dependency-path: "**/go.sum"
 
       # fetch downloads the three sources and checks them against the
       # release's checksums.txt. It exits 0 (sources ready), 1 (the release

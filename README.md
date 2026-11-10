@@ -48,8 +48,13 @@ network, then a random address in it. Same machine and method as above:
 ## Install
 
 ```sh
-go get github.com/haxqer/ip2geo
+go get github.com/haxqer/ip2geo        # the reader (and the CSV builder): standard library only
+go get github.com/haxqer/ip2geo/mmdb   # the .mmdb builder, if you build from MaxMind / DB-IP .mmdb files
 ```
+
+`ip2geo/mmdb` is a module of its own because it needs `maxminddb`: an
+application that only opens `.geoc` files never has `maxminddb` in its
+`go.mod` or its build.
 
 ## Try it now — sample data, no signup
 
@@ -285,7 +290,10 @@ db.Close()                            // a no-op today
   does. Built with `-fields registered`, it carries its registered country.
 
 The `ip2geo` reader package and the `ip2geo/csvdb` builder import only the
-standard library; the `ip2geo/mmdb` builder additionally uses `maxminddb`.
+standard library; the `ip2geo/mmdb` builder additionally uses `maxminddb`,
+and is a separate module (`github.com/haxqer/ip2geo/mmdb`) so that the
+`github.com/haxqer/ip2geo` module requires nothing. Use the same version of
+both.
 
 ## Reproduce the benchmark
 
@@ -302,7 +310,8 @@ For IPv4 and IPv6 lookups on your own source, `BenchmarkLookup` builds the
 readers in memory and reports ns/op and allocs/op:
 
 ```sh
-IP2GEO_TEST_MMDB=/path/to/City.mmdb go test -run '^$' -bench BenchmarkLookup -benchtime=2s ./mmdb/
+cd mmdb
+IP2GEO_TEST_MMDB=/path/to/City.mmdb go test -run '^$' -bench BenchmarkLookup -benchtime=2s .
 ```
 
 CI runs it on DB-IP IP-to-City Lite for pull requests and pushes to `main`,

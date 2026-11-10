@@ -34,6 +34,21 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   retention, `data-latest`, and how to build `.geoc` files from a MaxMind
   account in your own private CI. Those files must never be published.
 
+### Changed
+- `github.com/haxqer/ip2geo/mmdb` and `github.com/haxqer/ip2geo/cmd/ip2geo`
+  are now modules of their own, released with the same version as the root
+  module (tags `mmdb/vX.Y.Z` and `cmd/ip2geo/vX.Y.Z` next to `vX.Y.Z`). The
+  `github.com/haxqer/ip2geo` module requires nothing any more: an
+  application that imports only the reader (or `csvdb`) no longer has
+  `maxminddb` in its `go.mod`, `go.sum` or module graph. Import paths are
+  unchanged. If you import `ip2geo/mmdb`, run
+  `go get github.com/haxqer/ip2geo/mmdb@vX.Y.Z` (it brings the root module
+  to the same version) and keep the two on the same version from then on.
+  `go install github.com/haxqer/ip2geo/cmd/ip2geo@latest` works as before.
+  The file format and the API are unchanged.
+- `ExampleReader_fromMMDB` is now `mmdb.ExampleOpen`, and `TestDBIPParity`
+  moved from `csvdb` to the `mmdb` module, which has the `.mmdb` reader.
+
 ## [0.3.4] - 2026-11-10
 
 ### Changed

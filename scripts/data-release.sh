@@ -149,9 +149,11 @@ cmd_build() {
 	log "source: $mmdb ($(mib "$(filesize "$mmdb")"))"
 
 	# 3. Build the CLI from this checkout once and run it per profile (the
-	#    same as `go run ./cmd/ip2geo build`, without three compiles).
+	#    same as `go run . build` in cmd/ip2geo, without three compiles).
+	#    cmd/ip2geo is a module of its own that builds against this
+	#    checkout's root and mmdb modules.
 	local bin="$work/ip2geo"
-	(cd "$repo_root" && CGO_ENABLED=0 go build -trimpath -o "$bin" ./cmd/ip2geo)
+	(cd "$repo_root/cmd/ip2geo" && CGO_ENABLED=0 go build -trimpath -o "$bin" .)
 
 	local stats="$work/build-stats.txt" profile geoc line ip
 	: >"$stats"
@@ -289,8 +291,8 @@ cmd_verify() {
 	[[ -s $mmdb ]] || die "$mmdb not found; run '$0 build $month $2' first"
 	# No -race: under the race detector the City build alone exceeds go
 	# test's default timeout. See the integration job in ci.yml.
-	(cd "$repo_root" && IP2GEO_TEST_MMDB="$mmdb" \
-		go test -count=1 -timeout 30m -run 'TestBuildMatchesSource|TestRegisteredCountryOnly' -v ./mmdb/)
+	(cd "$repo_root/mmdb" && IP2GEO_TEST_MMDB="$mmdb" \
+		go test -count=1 -timeout 30m -run 'TestBuildMatchesSource|TestRegisteredCountryOnly' -v .)
 }
 
 # cmd_compat checks the assets against the newest released reader, not only
@@ -303,7 +305,10 @@ cmd_compat() {
 	work="$(abs_dir "$(work_dir "$out")")"
 	version="${RELEASED_VERSION:-latest}"
 
-	# Install outside the checkout so the local go.mod plays no part.
+	# Install outside the checkout so the local go.mod plays no part. The go
+	# command takes the CLI from the cmd/ip2geo module (tag
+	# cmd/ip2geo/vX.Y.Z) when it has the version, and from the root module
+	# for the releases before the CLI became a module of its own (v0.3.x).
 	(cd "$work" && GOBIN="$work/released" CGO_ENABLED=0 \
 		go install "github.com/haxqer/ip2geo/cmd/ip2geo@${version}")
 	bin="$work/released/ip2geo"

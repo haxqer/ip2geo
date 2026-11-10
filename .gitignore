@@ -6,7 +6,9 @@
 
 # build artifacts
 /ip2geo
+/cmd/ip2geo/ip2geo
 /bench/bench
+/scripts/sizetable/sizetable
 # GoReleaser output; untracked files here would stamp release binaries
 # "+dirty" (vcs.modified=true)
 /dist/
