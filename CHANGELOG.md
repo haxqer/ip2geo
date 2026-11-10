@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-10
+
 ### Added
 - A Rust reader in `rust/` (crate `ip2geo`, not published): reads GEO2,
   revision 2.1 included, and GEO1, validates its input as the Go reader
@@ -333,7 +335,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   failed build never leaves a partial output file.
 - The CLI validates `-latscale` instead of truncating it to 8 bits.
 
-[Unreleased]: https://github.com/haxqer/ip2geo/compare/v0.3.4...HEAD
+[Unreleased]: https://github.com/haxqer/ip2geo/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/haxqer/ip2geo/compare/v0.3.4...v0.4.0
 [0.3.4]: https://github.com/haxqer/ip2geo/compare/v0.3.3...v0.3.4
 [0.3.3]: https://github.com/haxqer/ip2geo/compare/v0.3.2...v0.3.3
 [0.3.2]: https://github.com/haxqer/ip2geo/compare/v0.3.1...v0.3.2

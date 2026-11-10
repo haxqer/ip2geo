@@ -3,7 +3,7 @@ module github.com/haxqer/ip2geo/scripts/sizetable
 go 1.25.0
 
 require (
-	github.com/haxqer/ip2geo v0.0.0-00010101000000-000000000000
+	github.com/haxqer/ip2geo v0.4.0
 	github.com/haxqer/ip2geo/mmdb v0.0.0-00010101000000-000000000000
 )
 
