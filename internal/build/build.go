@@ -192,31 +192,11 @@ const modulePath = "github.com/haxqer/ip2geo"
 // pseudo-version, or "(devel)"), or just "ip2geo" when the binary carries
 // no build information.
 var BuilderName = sync.OnceValue(func() string {
-	bi, ok := debug.ReadBuildInfo()
-	if !ok {
-		return "ip2geo"
+	bi, _ := debug.ReadBuildInfo()
+	if v := builderVersion(bi, version); v != "" {
+		return "ip2geo/" + v
 	}
-	mod := &bi.Main
-	if mod.Path != modulePath {
-		mod = nil
-		for _, d := range bi.Deps {
-			if d.Path == modulePath {
-				mod = d
-				break
-			}
-		}
-	}
-	if mod == nil {
-		return "ip2geo"
-	}
-	v := mod.Version
-	if mod.Replace != nil {
-		v = mod.Replace.Version
-	}
-	if v == "" {
-		v = "(devel)"
-	}
-	return "ip2geo/" + v
+	return "ip2geo"
 })
 
 // Builder accumulates the records and ranges of one build.
