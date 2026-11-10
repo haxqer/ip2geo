@@ -77,6 +77,10 @@ type Options struct {
 	LatScale    uint8
 	BuildTime   time.Time
 	Description string
+	// Builder is the builder string recorded in META; empty means
+	// BuilderName(). A build that must give the same bytes whatever binary
+	// runs it (the conformance files) sets it.
+	Builder string
 }
 
 // allowedFields returns the field sets profile p allows.
@@ -135,6 +139,9 @@ func (o *Options) Normalize() error {
 	}
 	if !utf8.ValidString(o.Description) {
 		return fmt.Errorf("option Description %.40q is not valid UTF-8: %w", o.Description, ErrOptions)
+	}
+	if len(o.Builder) > math.MaxUint16 || !utf8.ValidString(o.Builder) {
+		return fmt.Errorf("option Builder %.40q is not valid UTF-8 of at most %d bytes: %w", o.Builder, math.MaxUint16, ErrOptions)
 	}
 	if len(o.Languages) == 0 {
 		o.Languages = []string{"en"}
@@ -251,13 +258,17 @@ func New(opts Options, src Source) (*Builder, error) {
 	// The META strings are ordinary strings of the table. Interned first,
 	// they come right after the strings of 16-bit fields (or among them,
 	// when a 16-bit field uses the same string).
+	builder := opts.Builder
+	if builder == "" {
+		builder = BuilderName()
+	}
 	b.meta = format.Meta{
 		BuildTime:   uint64(opts.BuildTime.Unix()),
 		SourceTime:  src.BuildEpoch,
 		SourceType:  b.strs.id(src.Type),
 		Language:    b.strs.id(opts.Languages[0]),
 		Description: b.strs.id(opts.Description),
-		Builder:     b.strs.id(BuilderName()),
+		Builder:     b.strs.id(builder),
 	}
 	if len(opts.Languages) > 1 {
 		for _, l := range opts.Languages {
