@@ -1,0 +1,3 @@
+# The conformance files are compared byte for byte with a fresh generation
+# (conformance_test.go) and read by other readers: never convert line endings.
+testdata/conformance/** -text

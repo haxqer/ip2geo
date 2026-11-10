@@ -20,6 +20,7 @@ func TestBuilderVersion(t *testing.T) {
 		{"main module, go run", &debug.BuildInfo{Main: debug.Module{Path: modulePath, Version: "(devel)"}}, "", "(devel)"},
 		{"main module, no version", &debug.BuildInfo{Main: debug.Module{Path: modulePath}}, "", "(devel)"},
 		{"not in the binary", &debug.BuildInfo{Main: debug.Module{Path: "example.com/app", Version: "v1.0.0"}}, "", ""},
+		{"test binary of a nested module, no deps listed (Go 1.25)", &debug.BuildInfo{Main: debug.Module{Path: modulePath + "/mmdb", Version: "(devel)"}}, "", "(devel)"},
 		{"dependency (go install @v)", &debug.BuildInfo{
 			Main: debug.Module{Path: modulePath + "/cmd/ip2geo", Version: "v0.4.0"},
 			Deps: []*debug.Module{{Path: modulePath, Version: "v0.4.0", Sum: "h1:x"}},

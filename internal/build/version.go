@@ -41,6 +41,12 @@ func builderVersion(bi *debug.BuildInfo, linked string) string {
 		}
 	}
 	if mod == nil {
+		// Test binaries built by Go 1.25 and older list no dependencies.
+		// A main module of this repository (mmdb, cmd/ip2geo) builds
+		// against this module's directory, which has no version.
+		if strings.HasPrefix(bi.Main.Path, modulePath+"/") {
+			return "(devel)"
+		}
 		return ""
 	}
 	v := mod.Version
