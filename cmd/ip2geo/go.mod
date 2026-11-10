@@ -11,3 +11,7 @@ require (
 	github.com/oschwald/maxminddb-golang/v2 v2.4.1 // indirect
 	golang.org/x/sys v0.46.0 // indirect
 )
+
+replace github.com/haxqer/ip2geo => ../..
+
+replace github.com/haxqer/ip2geo/mmdb => ../../mmdb
