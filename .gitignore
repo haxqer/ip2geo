@@ -1,6 +1,8 @@
 # compiled databases and MaxMind source data
 *.geoc
 *.mmdb
+# except the synthetic databases of the conformance suite
+!/testdata/conformance/*.geoc
 
 # build artifacts
 /ip2geo

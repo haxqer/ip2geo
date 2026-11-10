@@ -6,6 +6,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- A language-neutral conformance suite in `testdata/conformance`: small
+  synthetic databases (every profile, the ASN profile, extension fields and
+  languages, a GEO1 file) and, for each, a JSON document of the answers a
+  reader must give (`Lookup`, `LookupDetails`, `ASN`, `LookupRange`,
+  `Ranges`, metadata) for addresses chosen to hit range edges, the IPv6
+  forms of IPv4 addresses and found-but-empty records, so that a reader in
+  another language can prove it reads the format as the Go one does. Its
+  README specifies the JSON. `go test` checks the Go reader against it and
+  that the files match a fresh `go generate ./internal/conformance`.
+
 ## [0.3.4] - 2026-11-10
 
 ### Changed
