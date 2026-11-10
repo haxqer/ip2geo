@@ -182,7 +182,8 @@ The file stores IPv4 data only in the IPv4 tables. Readers map
 the IPv4 address is bits 16–47) and `2001::/32` (Teredo server, bits 32–63)
 to the embedded IPv4 address before searching, which is what MaxMind
 databases do through their alias pointers. `64:ff9b::/96` (NAT64) is not
-mapped. The zero address is never found.
+mapped. So `::` reads as `0.0.0.0`. (The Go API's zero `netip.Addr`, which is
+no address at all, is never found.)
 
 IPv6 boundaries inside `::/96`, `2001::/32` or `2002::/16` are therefore
 never read: a file holding them is valid, but no lookup returns their data.

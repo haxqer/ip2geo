@@ -85,7 +85,7 @@ never distinguishes absent from empty. Numeric fields that are absent are
 | `file` | string | the database's file name, in this directory |
 | `about` | string | what the file covers (informational) |
 | `metadata` | object | the file's metadata, below |
-| `languages` | array of string, or `null` | the languages of the names, primary first (Go: `Reader.Languages`). For a GEO2 file: LANGS if present, else `[META.language]`. `null` for the GEO1 file, which records no language |
+| `languages` | array of string, or `null` | the languages of the names, primary first (Go: `Reader.Languages`). For a GEO2 file: LANGS if present, else `[META.language]`, or `null` when META.language is empty (no current file has that case). `null` for the GEO1 file, which records no language |
 | `fields` | u32 | the field set bits of XFIELDS (Go: `Reader.Fields`): bit 0 EU, 1 continent, 2 registered, 3 subdivisions, 4 postal, 5 metro, 6 traits, 7 location; `0` without XFIELDS |
 | `queries` | array of query | the looked-up addresses, below |
 | `ranges` | array of range entry | every covered range, below |

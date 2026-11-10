@@ -314,6 +314,14 @@ and is a separate module (`github.com/haxqer/ip2geo/mmdb`) so that the
 `github.com/haxqer/ip2geo` module requires nothing. Use the same version of
 both.
 
+## Other languages
+
+[`rust/`](rust/) is a Rust crate that reads GEO2 and GEO1 files. It passes the
+language-neutral conformance suite in
+[`testdata/conformance`](testdata/conformance/), which pins down the answers
+any reader must give. The Go reader is the reference. The format itself is
+specified in [docs/FORMAT.md](docs/FORMAT.md).
+
 ## Reproduce the benchmark
 
 ```sh
