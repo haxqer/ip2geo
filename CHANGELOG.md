@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.3.4] - 2026-11-10
+
 ### Changed
 - IPv4 `LookupRange` no longer binary-searches V4IDX when a range's ends sit
   in other /16s than the address, which is the usual case on sparse files:
@@ -247,7 +249,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   failed build never leaves a partial output file.
 - The CLI validates `-latscale` instead of truncating it to 8 bits.
 
-[Unreleased]: https://github.com/haxqer/ip2geo/compare/v0.3.3...HEAD
+[Unreleased]: https://github.com/haxqer/ip2geo/compare/v0.3.4...HEAD
+[0.3.4]: https://github.com/haxqer/ip2geo/compare/v0.3.3...v0.3.4
 [0.3.3]: https://github.com/haxqer/ip2geo/compare/v0.3.2...v0.3.3
 [0.3.2]: https://github.com/haxqer/ip2geo/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/haxqer/ip2geo/compare/v0.3.0...v0.3.1
